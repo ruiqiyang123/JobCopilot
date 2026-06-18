@@ -56,7 +56,7 @@
 
 ### 1. 下载
 ```bash
-git clone https://github.com/huluobo2237-pixel/boss-auto-apply.git
+git clone https://github.com/huluobo2237-pixel/JobCopilot.git
 ```
 或直接 `Code → Download ZIP` 解压。
 
