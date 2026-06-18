@@ -39,7 +39,8 @@
 
 ## 📸 效果预览
 
-> 在这里放 2-3 张截图：①侧边栏配置与审核界面 ②投递日志 ③投递流程图
+> <img width="1025" height="222" alt="image" src="https://github.com/user-attachments/assets/cb1f9d4e-99b2-4bca-ad85-2201c9d306fa" />
+①侧边栏配置与审核界面 ②投递日志 ③投递流程图
 > （仓库 `docs/投递流程图.html`，浏览器打开后截图即可）
 
 ```
