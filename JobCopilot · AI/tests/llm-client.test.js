@@ -44,6 +44,32 @@ test('DeepSeek 保持 Bearer 和 max_tokens 且不强开 JSON 模式', () => {
   assert.equal(request.init.body.response_format, undefined);
 });
 
+test('LongCat 使用官方 endpoint、Bearer 和 max_tokens', () => {
+  const preset = LLMClient.getProviderPreset('longcat');
+  const request = LLMClient.buildRequest({
+    provider: 'longcat',
+    apiKey: 'longcat-test-key'
+  }, MESSAGES, { maxTokens: 16, temperature: 0, jsonMode: true });
+
+  assert.deepEqual(preset, {
+    id: 'longcat',
+    name: 'LongCat',
+    baseUrl: 'https://api.longcat.chat/openai/v1',
+    model: 'LongCat-2.0',
+    authType: 'bearer',
+    tokenParameter: 'max_tokens',
+    jsonMode: false,
+    thinking: 'disabled'
+  });
+  assert.equal(request.url, 'https://api.longcat.chat/openai/v1/chat/completions');
+  assert.equal(request.init.headers.Authorization, 'Bearer longcat-test-key');
+  assert.equal(request.init.headers['api-key'], undefined);
+  assert.equal(request.init.body.model, 'LongCat-2.0');
+  assert.equal(request.init.body.max_tokens, 16);
+  assert.equal(request.init.body.response_format, undefined);
+  assert.deepEqual(request.init.body.thinking, { type: 'disabled' });
+});
+
 test('自定义接口接受根地址或完整 chat completions 地址', () => {
   const rootRequest = LLMClient.buildRequest({
     provider: 'custom',

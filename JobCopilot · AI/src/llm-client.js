@@ -23,6 +23,16 @@
       authType: 'bearer',
       tokenParameter: 'max_tokens',
       jsonMode: false
+    }),
+    longcat: Object.freeze({
+      id: 'longcat',
+      name: 'LongCat',
+      baseUrl: 'https://api.longcat.chat/openai/v1',
+      model: 'LongCat-2.0',
+      authType: 'bearer',
+      tokenParameter: 'max_tokens',
+      jsonMode: false,
+      thinking: 'disabled'
     })
   });
 
@@ -44,7 +54,8 @@
       model: String(source.model || (preset && preset.model) || '').trim(),
       authType: preset ? preset.authType : (source.authType || 'bearer'),
       tokenParameter: preset ? preset.tokenParameter : 'max_tokens',
-      jsonMode: Boolean(preset && preset.jsonMode)
+      jsonMode: Boolean(preset && preset.jsonMode),
+      thinking: preset && preset.thinking ? preset.thinking : ''
     };
   }
 
@@ -96,6 +107,7 @@
     if (settings.jsonMode && normalized.jsonMode) {
       body.response_format = { type: 'json_object' };
     }
+    if (normalized.thinking) body.thinking = { type: normalized.thinking };
 
     return {
       url: getChatEndpoint(normalized.baseUrl),

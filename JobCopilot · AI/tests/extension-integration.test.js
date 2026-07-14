@@ -40,6 +40,7 @@ test('侧边栏提供模型配置、迁移、域名授权和测试连接', () =>
   assert.match(sidepanelHtml, /id="llmAuthType"/);
   assert.match(sidepanelHtml, /id="testLlm"/);
   assert.match(sidepanelHtml, /id="llmTestStatus"/);
+  assert.match(sidepanelHtml, /value="longcat"[^>]*>LongCat/);
   assert.ok(sidepanelHtml.indexOf('llm-client.js') < sidepanelHtml.indexOf('sidepanel.js'));
 
   assert.match(sidepanelJs, /LLMClient\.migrateStoredConfig/);
@@ -57,11 +58,12 @@ test('侧边栏提供模型配置、迁移、域名授权和测试连接', () =>
   );
 });
 
-test('Manifest 固定授权 MiMo，并把其他 HTTPS 域名设为可选', () => {
+test('Manifest 固定授权内置服务商，并把其他 HTTPS 域名设为可选', () => {
   const manifest = JSON.parse(read('manifest.json'));
 
   assert.ok(manifest.host_permissions.includes('https://api.xiaomimimo.com/*'));
   assert.ok(manifest.host_permissions.includes('https://api.deepseek.com/*'));
+  assert.ok(manifest.host_permissions.includes('https://api.longcat.chat/*'));
   assert.ok(manifest.optional_host_permissions.includes('https://*/*'));
   assert.ok(!manifest.host_permissions.includes('<all_urls>'));
 });

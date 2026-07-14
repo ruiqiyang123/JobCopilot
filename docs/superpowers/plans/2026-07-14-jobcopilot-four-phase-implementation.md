@@ -30,21 +30,22 @@
 
 ### 任务 2：内置 LongCat
 
-- [ ] 先在 `tests/llm-client.test.js` 和 `tests/extension-integration.test.js` 添加失败测试，断言 `longcat` 预设、Bearer、`max_tokens`、正确 endpoint、侧边栏选项和 Manifest 权限。
-- [ ] 运行定向测试并确认因缺少 `longcat` 失败。
-- [ ] 在 `llm-client.js` 增加：
+- [x] 先在 `tests/llm-client.test.js` 和 `tests/extension-integration.test.js` 添加失败测试，断言 `longcat` 预设、Bearer、`max_tokens`、正确 endpoint、侧边栏选项和 Manifest 权限。
+- [x] 运行定向测试并确认因缺少 `longcat` 失败。
+- [x] 在 `llm-client.js` 增加：
 
 ```javascript
 longcat: {
   id: 'longcat', name: 'LongCat',
   baseUrl: 'https://api.longcat.chat/openai/v1', model: 'LongCat-2.0',
-  authType: 'bearer', tokenParameter: 'max_tokens', jsonMode: false
+  authType: 'bearer', tokenParameter: 'max_tokens', jsonMode: false,
+  thinking: 'disabled'
 }
 ```
 
-- [ ] 更新侧边栏选项、占位提示、Manifest 固定权限和 README。
-- [ ] 运行全量测试、JS 语法检查、JSON 校验和密钥扫描。
-- [ ] 勾选第一阶段并提交、推送当前 Draft PR 分支。
+- [x] 更新侧边栏选项、占位提示、Manifest 固定权限和 README。
+- [x] 运行全量测试、JS 语法检查、JSON 校验和密钥扫描。
+- [x] 勾选第一阶段并提交、推送当前 Draft PR 分支。
 
 ### 任务 3：可配置岗位硬筛选
 

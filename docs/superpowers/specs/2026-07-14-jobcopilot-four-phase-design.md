@@ -25,7 +25,10 @@ model: LongCat-2.0
 authType: bearer
 tokenParameter: max_tokens
 jsonMode: false
+thinking: disabled
 ```
+
+LongCat 默认关闭 thinking，避免短输出任务先耗尽思考 token 而缺少 `message.content`；岗位筛选和招呼语仍使用现有提示词。
 
 扩展为 `https://api.longcat.chat/*` 申请固定主机权限。API Key 只保存在 `chrome.storage.local`，不进入源码、测试、普通日志或 Git 提交。
 
@@ -79,4 +82,3 @@ offer      Offer
 - 所有动态 HTML 均经过转义。
 - API Key 不出现在仓库、错误明文或测试快照中。
 - 未通过上一阶段验收时不开始下一阶段。
-

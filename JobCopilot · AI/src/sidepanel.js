@@ -23,7 +23,12 @@ function applyProviderUI(forceDefaults) {
     $('llmBaseUrl').value = preset.baseUrl;
     $('llmAuthType').value = preset.authType;
     if (forceDefaults || !$('llmModel').value.trim()) $('llmModel').value = preset.model;
-    $('llmApiKey').placeholder = provider === 'xiaomi' ? 'sk- 开头的 MiMo API Key' : 'DeepSeek API Key';
+    const placeholders = {
+      xiaomi: 'sk- 开头的 MiMo API Key',
+      deepseek: 'DeepSeek API Key',
+      longcat: 'LongCat API Key'
+    };
+    $('llmApiKey').placeholder = placeholders[provider] || '服务商 API Key';
   } else if (forceDefaults) {
     $('llmBaseUrl').value = '';
     $('llmModel').value = '';

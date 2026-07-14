@@ -9,7 +9,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Edge%20%7C%20Chrome-brightgreen.svg)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-orange.svg)
-![AI](https://img.shields.io/badge/AI-MiMo%20%7C%20DeepSeek%20%7C%20Custom-purple.svg)
+![AI](https://img.shields.io/badge/AI-MiMo%20%7C%20DeepSeek%20%7C%20LongCat%20%7C%20Custom-purple.svg)
 
 [功能特性](#-功能特性) · [快速开始](#-快速开始) · [工作流程](#-工作流程) · [免责声明](#️-免责声明)
 
@@ -30,7 +30,7 @@
 ## ✨ 功能特性
 
 - 🔍 **自动搜索收集**：按关键词、城市自动抓取岗位，数量自定义
-- 🤖 **可配置 AI 筛选**：支持 Xiaomi MiMo、DeepSeek 和自定义 HTTPS OpenAI 兼容接口
+- 🤖 **可配置 AI 筛选**：支持 Xiaomi MiMo、DeepSeek、LongCat 和自定义 HTTPS OpenAI 兼容接口
 - ✍️ **千岗千面招呼语**：每个岗位单独生成「熟悉 XXX、做过 XXX」格式招呼语，精准对口
 - ✅ **审核确认机制**：投递前列出匹配岗位（含筛选理由），你勾选确认，绝不盲投
 - 📎 **自动发送简历**：先发简历图片，再发招呼语，一个岗位完整闭环再投下一个
@@ -63,7 +63,7 @@ git clone https://github.com/ruiqiyang123/JobCopilot.git
 ### 3. 配置
 | 配置项 | 说明 |
 |--------|------|
-| AI 服务商 | 默认 Xiaomi MiMo，也可选择 DeepSeek 或自定义 HTTPS OpenAI 兼容接口 |
+| AI 服务商 | 默认 Xiaomi MiMo，也可选择 DeepSeek、LongCat 或自定义 HTTPS OpenAI 兼容接口 |
 | API Key | 用于 AI 筛选和生成招呼语；从所选服务商控制台创建 |
 | API 地址 / 模型 | 内置服务商自动填充；自定义模式下由用户填写 |
 | 简历图片 | 投递时发给 HR 的简历截图 |
@@ -78,6 +78,13 @@ git clone https://github.com/ruiqiyang123/JobCopilot.git
 ```text
 Base URL: https://api.xiaomimimo.com/v1
 Model: mimo-v2.5
+```
+
+#### LongCat 默认配置
+
+```text
+Base URL: https://api.longcat.chat/openai/v1
+Model: LongCat-2.0
 ```
 
 ### 4. 使用
@@ -98,7 +105,7 @@ Model: mimo-v2.5
 ## 🛠️ 技术栈
 
 - **浏览器扩展**：Manifest V3，原生 JavaScript，无框架
-- **AI 模型**：Xiaomi MiMo、DeepSeek 或自定义 OpenAI 兼容模型
+- **AI 模型**：Xiaomi MiMo、DeepSeek、LongCat 或自定义 OpenAI 兼容模型
 - **架构**：Service Worker 编排 + Content Scripts 操作页面 + 侧边栏 UI
 
 ## 📁 项目结构

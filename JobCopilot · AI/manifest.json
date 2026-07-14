@@ -10,7 +10,8 @@
   "host_permissions": [
     "*://*.zhipin.com/*",
     "https://api.deepseek.com/*",
-    "https://api.xiaomimimo.com/*"
+    "https://api.xiaomimimo.com/*",
+    "https://api.longcat.chat/*"
   ],
   "optional_host_permissions": ["https://*/*"],
   "background": { "service_worker": "src/background.js" },
