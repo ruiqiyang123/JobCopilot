@@ -6,6 +6,7 @@ const LOAD_FIELDS = BASIC_CFG_FIELDS.concat(LLM_STORAGE_FIELDS, ['resumeImage', 
 let currentScreened = [];
 let currentPreviews = {};
 let currentLastBatch = null;
+let trackerRecords = [];
 
 // 折叠
 document.querySelectorAll('.card-h[data-toggle]').forEach(h => {
@@ -213,6 +214,50 @@ async function restoreState() {
   if (currentScreened.length) renderReview(currentScreened);
 }
 
+async function refreshTracker() {
+  const response = await runtimeMessage({ type: 'GET_TRACKER' });
+  if (!response.ok) throw new Error(response.error || '进度读取失败');
+  trackerRecords = response.result.records || [];
+  renderTracker();
+}
+
+function safeJobLink(link) {
+  try {
+    const url = new URL(link);
+    if (url.protocol !== 'https:' || !/(^|\.)zhipin\.com$/.test(url.hostname)) return '';
+    return url.toString();
+  } catch (error) { return ''; }
+}
+
+function trackerStatusOptions(current) {
+  return JobTracker.STATUS_OPTIONS.map(option =>
+    '<option value="' + esc(option.value) + '"' + (option.value === current ? ' selected' : '')
+      + '>' + esc(option.label) + '</option>'
+  ).join('');
+}
+
+function renderTracker() {
+  const filter = $('trackerFilter').value;
+  const summary = JobTracker.summarize(trackerRecords);
+  $('trackerSummary').textContent = '总 ' + summary.total + ' · 已沟通 ' + summary.contacted
+    + ' · 面试 ' + summary.interview + ' · Offer ' + summary.offer;
+  const visible = trackerRecords.slice()
+    .filter(record => filter === 'all' || record.status === filter)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  $('trackerList').innerHTML = visible.map(record => {
+    const link = safeJobLink(record.link);
+    const title = link
+      ? '<a class="tracker-link" href="' + esc(link) + '" target="_blank" rel="noreferrer">' + esc(record.name) + '</a>'
+      : esc(record.name);
+    const updated = record.updatedAt ? new Date(record.updatedAt).toLocaleString('zh-CN', { hour12: false }) : '';
+    return '<div class="tracker-item"><div class="tracker-head"><div class="tracker-title">' + title + '</div>'
+      + '<select class="tracker-status" data-tracker-id="' + esc(record.id) + '">'
+      + trackerStatusOptions(record.status) + '</select></div>'
+      + '<div class="tracker-meta">' + esc(record.company || '公司未知') + ' · ' + esc(record.salary || '薪资未知')
+      + (updated ? ' · 更新 ' + esc(updated) : '') + '</div></div>';
+  }).join('') || '<div class="job-sub">暂无插件处理过的岗位</div>';
+}
+
 function updateRunModeUI() {
   const live = $('runMode').value === 'live';
   $('runModeHint').textContent = live
@@ -232,6 +277,24 @@ $('llmProvider').addEventListener('change', () => {
 $('experienceFilterEnabled').addEventListener('change', () => syncFilterEnabled('experience'));
 $('companySizeFilterEnabled').addEventListener('change', () => syncFilterEnabled('companySize'));
 $('runMode').addEventListener('change', updateRunModeUI);
+$('trackerFilter').addEventListener('change', renderTracker);
+$('trackerList').addEventListener('change', async (event) => {
+  const select = event.target.closest('[data-tracker-id]');
+  if (!select) return;
+  select.disabled = true;
+  try {
+    const response = await runtimeMessage({
+      type: 'UPDATE_TRACKER_STATUS', jobId: select.dataset.trackerId, status: select.value
+    });
+    if (!response.ok) throw new Error(response.error || '进度更新失败');
+    trackerRecords = response.result.records || [];
+    renderTracker();
+    addLog('岗位进度已更新', 'success');
+  } catch (error) {
+    addLog(error.message, 'error');
+    await refreshTracker().catch(() => {});
+  }
+});
 updateRunModeUI();
 
 $('saveCfg').addEventListener('click', async () => {
@@ -278,7 +341,10 @@ $('btnCollect').addEventListener('click', async () => {
   chrome.runtime.sendMessage({ type: 'START_COLLECT' });
 });
 
-loadConfig().then(restoreState).catch(error => addLog('配置或状态载入失败：' + error.message, 'error'));
+loadConfig().then(async () => {
+  await restoreState();
+  await refreshTracker();
+}).catch(error => addLog('配置或状态载入失败：' + error.message, 'error'));
 
 $('btnDeliver').addEventListener('click', async () => {
   const ids = Array.from(document.querySelectorAll('.job-item input[type=checkbox]:checked:not(:disabled)'))
@@ -407,6 +473,10 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (msg.phase === 'review' || msg.phase === 'done' || msg.phase === 'idle') setRunning(false);
   }
   if (msg.type === 'SCREENED') renderReview(msg.screened);
+  if (msg.type === 'TRACKER_UPDATED') {
+    trackerRecords = msg.records || [];
+    renderTracker();
+  }
   if (msg.type === 'PREVIEWED') {
     currentPreviews = msg.previews || {};
     currentLastBatch = msg.lastBatch || null;

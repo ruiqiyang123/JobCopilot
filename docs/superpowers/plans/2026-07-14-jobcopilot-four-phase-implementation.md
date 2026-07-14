@@ -88,8 +88,8 @@ canDeliver(jobId, previews, processed)
 
 ### 任务 5：本地岗位进度管理
 
-- [ ] 创建 `tests/job-tracker.test.js`，覆盖 ID 去重、重复收集不降级、发送成功变为已沟通、五个手动状态、历史和非法状态拒绝。
-- [ ] 创建 `job-tracker.js`，导出：
+- [x] 创建 `tests/job-tracker.test.js`，覆盖 ID 去重、重复收集不降级、发送成功变为已沟通、五个手动状态、历史和非法状态拒绝。
+- [x] 创建 `job-tracker.js`，导出：
 
 ```javascript
 upsertCollected(records, job, at)
@@ -97,10 +97,10 @@ setStatus(records, jobId, status, at)
 summarize(records)
 ```
 
-- [ ] 后台在收集后 upsert；正式发送成功后设为 contacted；增加 `GET_TRACKER` 和 `UPDATE_TRACKER_STATUS` 消息。
-- [ ] 侧边栏增加进度看板、状态计数、筛选和手动状态下拉框，不提供 BOSS 历史扫描。
-- [ ] 持久化键使用 `jobTrackerRecords`，记录基础信息、状态、`updatedAt` 和 `history`。
-- [ ] 运行全量检查，勾选第四阶段并提交、推送。
+- [x] 后台在收集后 upsert；正式发送成功后设为 contacted；增加 `GET_TRACKER` 和 `UPDATE_TRACKER_STATUS` 消息。
+- [x] 侧边栏增加进度看板、状态计数、筛选和手动状态下拉框，不提供 BOSS 历史扫描。
+- [x] 持久化键使用 `jobTrackerRecords`，记录基础信息、状态、`updatedAt` 和 `history`。
+- [x] 运行全量检查，勾选第四阶段并提交、推送。
 
 ### 任务 6：最终回归与分支收尾
 

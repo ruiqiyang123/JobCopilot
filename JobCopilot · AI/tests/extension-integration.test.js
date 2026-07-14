@@ -128,3 +128,24 @@ test('模拟运行与正式投递使用独立路径和双重安全门', () => {
   assert.match(sidepanelJs, /START_PREVIEW/);
   assert.match(contentSearch, /currentJob/);
 });
+
+test('进度看板只管理插件岗位并持久化手动状态', () => {
+  const background = read('src/background.js');
+  const sidepanelHtml = read('src/sidepanel.html');
+  const sidepanelJs = read('src/sidepanel.js');
+
+  assert.match(background, /importScripts\([^)]*job-tracker\.js/);
+  assert.match(background, /jobTrackerRecords/);
+  assert.match(background, /JobTracker\.upsertCollected/);
+  assert.match(background, /JobTracker\.setStatus/);
+  assert.match(background, /GET_TRACKER/);
+  assert.match(background, /UPDATE_TRACKER_STATUS/);
+  assert.match(sidepanelHtml, /id="trackerCard"/);
+  assert.match(sidepanelHtml, /id="trackerFilter"/);
+  assert.match(sidepanelHtml, /id="trackerSummary"/);
+  assert.match(sidepanelHtml, /id="trackerList"/);
+  assert.ok(sidepanelHtml.indexOf('job-tracker.js') < sidepanelHtml.indexOf('sidepanel.js'));
+  assert.match(sidepanelJs, /GET_TRACKER/);
+  assert.match(sidepanelJs, /UPDATE_TRACKER_STATUS/);
+  assert.doesNotMatch(background, /扫描.*BOSS.*历史|IMPORT_BOSS_HISTORY/);
+});

@@ -1,5 +1,8 @@
 // ===== BOSS自动投递 Service Worker：编排 收集→筛选→审核→投递 + 可配置 LLM =====
-importScripts('/src/selectors.js', '/src/job-filters.js', '/src/workflow-safety.js', '/src/llm-client.js');
+importScripts(
+  '/src/selectors.js', '/src/job-filters.js', '/src/workflow-safety.js',
+  '/src/job-tracker.js', '/src/llm-client.js'
+);
 
 const CFG_KEYS = [
   'llmProvider', 'llmApiKey', 'llmBaseUrl', 'llmModel', 'llmAuthType', 'dsKey',
@@ -9,7 +12,7 @@ const CFG_KEYS = [
 let state = {
   phase: 'idle', paused: false, aborted: false,
   jobs: [], screened: [], greetings: {}, results: [], processed: {},
-  previews: {}, lastBatch: null
+  previews: {}, lastBatch: null, trackerRecords: []
 };
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -46,6 +49,44 @@ function hardFilterJob(job, cfg) {
 function blockedScreenResult(job) {
   const prefix = job.filterStatus === 'pending' ? '待人工确认：' : '硬筛选排除：';
   return Object.assign({}, job, { match: false, reason: prefix + (job.filterReasons || []).join('；') });
+}
+
+async function hydrateTrackerRecords() {
+  if (state.trackerRecords.length) return state.trackerRecords;
+  const saved = await chrome.storage.local.get('jobTrackerRecords');
+  state.trackerRecords = saved.jobTrackerRecords || [];
+  return state.trackerRecords;
+}
+
+async function persistTrackerRecords() {
+  await chrome.storage.local.set({ jobTrackerRecords: state.trackerRecords });
+  chrome.runtime.sendMessage({
+    type: 'TRACKER_UPDATED',
+    records: state.trackerRecords,
+    summary: JobTracker.summarize(state.trackerRecords)
+  }).catch(() => {});
+}
+
+async function trackCollectedJobs(jobs) {
+  await hydrateTrackerRecords();
+  (jobs || []).forEach(job => {
+    state.trackerRecords = JobTracker.upsertCollected(state.trackerRecords, job, Date.now());
+  });
+  await persistTrackerRecords();
+}
+
+async function updateTrackerStatus(jobId, status) {
+  await hydrateTrackerRecords();
+  state.trackerRecords = JobTracker.setStatus(state.trackerRecords, jobId, status, Date.now());
+  await persistTrackerRecords();
+  return { records: state.trackerRecords, summary: JobTracker.summarize(state.trackerRecords) };
+}
+
+async function markTrackerContacted(job) {
+  await hydrateTrackerRecords();
+  state.trackerRecords = JobTracker.upsertCollected(state.trackerRecords, job, Date.now());
+  state.trackerRecords = JobTracker.setStatus(state.trackerRecords, job.id, 'contacted', Date.now());
+  await persistTrackerRecords();
 }
 
 // ── 可配置模型 ──
@@ -181,6 +222,7 @@ async function runCollect() {
     log(error.message, 'error'); state.phase = 'idle'; pushPhase(); return;
   }
   state.jobs = (r.jobs || []).map(job => hardFilterJob(job, cfg));
+  await trackCollectedJobs(state.jobs);
   log('收集到 ' + state.jobs.length + ' 个岗位', 'success');
   if (!state.jobs.length) { state.phase = 'idle'; pushPhase(); return; }
 
@@ -411,6 +453,8 @@ async function runDeliver(jobIds) {
       state.lastBatch.succeeded.push(job.id);
       state.processed[job.id] = 1;
       await chrome.storage.local.set({ processed: state.processed, lastBatch: state.lastBatch });
+      try { await markTrackerContacted(job); }
+      catch (trackerError) { log('岗位已发送，但进度记录更新失败：' + trackerError.message, 'warn'); }
       log('  ✓ 投递成功', 'success');
       progress(k + 1, ids.length, '投递');
       await rand(2500, 4500);
@@ -466,6 +510,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     confirmFilterPending(msg.jobId)
       .then(result => sendResponse({ ok: true, result: result }))
       .catch(error => sendResponse({ ok: false, error: error && error.message ? error.message : '人工确认失败' }));
+    return true;
+  }
+  if (msg.type === 'GET_TRACKER') {
+    hydrateTrackerRecords()
+      .then(records => sendResponse({
+        ok: true,
+        result: { records: records, summary: JobTracker.summarize(records) }
+      }))
+      .catch(error => sendResponse({ ok: false, error: error && error.message ? error.message : '进度读取失败' }));
+    return true;
+  }
+  if (msg.type === 'UPDATE_TRACKER_STATUS') {
+    updateTrackerStatus(msg.jobId, msg.status)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error && error.message ? error.message : '进度更新失败' }));
     return true;
   }
   if (msg.type === 'PAUSE') { state.paused = true; log('已暂停', 'warn'); sendResponse({ ok: true }); return; }

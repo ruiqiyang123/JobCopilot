@@ -108,6 +108,24 @@
     </div>
   </section>
 
+  <!-- 进度管理 -->
+  <section class="card" id="trackerCard">
+    <div class="card-h"><span>④ 岗位进度</span><span id="trackerSummary">0 个岗位</span></div>
+    <div class="card-b">
+      <label>状态筛选</label>
+      <select id="trackerFilter">
+        <option value="all">全部状态</option>
+        <option value="collected">已收集</option>
+        <option value="contacted">已沟通</option>
+        <option value="replied">已回复</option>
+        <option value="interview">面试</option>
+        <option value="rejected">淘汰</option>
+        <option value="offer">Offer</option>
+      </select>
+      <div id="trackerList"></div>
+    </div>
+  </section>
+
   <!-- 日志 -->
   <section class="card">
     <div class="card-h"><span>日志</span><button class="mini-btn" id="clearLog">清空</button></div>
@@ -116,6 +134,7 @@
 
   <script src="llm-client.js"></script>
   <script src="job-filters.js"></script>
+  <script src="job-tracker.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>
