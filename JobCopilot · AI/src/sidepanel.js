@@ -3,6 +3,9 @@ const $ = (id) => document.getElementById(id);
 const BASIC_CFG_FIELDS = ['resumeText', 'keyword', 'city', 'count'];
 const LLM_STORAGE_FIELDS = ['llmProvider', 'llmApiKey', 'llmBaseUrl', 'llmModel', 'llmAuthType'];
 const LOAD_FIELDS = BASIC_CFG_FIELDS.concat(LLM_STORAGE_FIELDS, ['resumeImage', 'dsKey', 'jobFilterConfig']);
+let currentScreened = [];
+let currentPreviews = {};
+let currentLastBatch = null;
 
 // 折叠
 document.querySelectorAll('.card-h[data-toggle]').forEach(h => {
@@ -200,6 +203,26 @@ function runtimeMessage(message) {
   });
 }
 
+async function restoreState() {
+  const response = await runtimeMessage({ type: 'GET_STATE' });
+  if (!response.ok) throw new Error(response.error || '状态读取失败');
+  const result = response.result || {};
+  currentScreened = result.screened || [];
+  currentPreviews = result.previews || {};
+  currentLastBatch = result.lastBatch || null;
+  if (currentScreened.length) renderReview(currentScreened);
+}
+
+function updateRunModeUI() {
+  const live = $('runMode').value === 'live';
+  $('runModeHint').textContent = live
+    ? '正式模式只允许投递已经预演成功的岗位；点击后还会进行一次批次确认和发送前复检。'
+    : '默认安全模式：读取完整 JD、二次校验并生成招呼语，不会建立沟通。';
+  $('runModeHint').classList.toggle('live', live);
+  $('btnDeliver').textContent = live ? '正式投递选中岗位' : '预演选中岗位';
+  if (currentScreened.length) renderReview(currentScreened);
+}
+
 $('llmProvider').addEventListener('change', () => {
   $('llmApiKey').value = '';
   applyProviderUI(true);
@@ -208,6 +231,8 @@ $('llmProvider').addEventListener('change', () => {
 
 $('experienceFilterEnabled').addEventListener('change', () => syncFilterEnabled('experience'));
 $('companySizeFilterEnabled').addEventListener('change', () => syncFilterEnabled('companySize'));
+$('runMode').addEventListener('change', updateRunModeUI);
+updateRunModeUI();
 
 $('saveCfg').addEventListener('click', async () => {
   try {
@@ -245,19 +270,35 @@ $('btnCollect').addEventListener('click', async () => {
     return addLog(error.message, 'error');
   }
   if (!$('keyword').value.trim()) return addLog('请先填岗位关键词', 'error');
+  $('runMode').value = 'preview';
+  currentScreened = []; currentPreviews = {}; currentLastBatch = null;
+  updateRunModeUI();
   $('reviewCard').style.display = 'none';
   setRunning(true);
   chrome.runtime.sendMessage({ type: 'START_COLLECT' });
 });
 
-loadConfig().catch(error => addLog('配置载入失败：' + error.message, 'error'));
+loadConfig().then(restoreState).catch(error => addLog('配置或状态载入失败：' + error.message, 'error'));
 
-$('btnDeliver').addEventListener('click', () => {
-  const ids = Array.from(document.querySelectorAll('.job-item input:checked')).map(c => c.dataset.id);
+$('btnDeliver').addEventListener('click', async () => {
+  const ids = Array.from(document.querySelectorAll('.job-item input[type=checkbox]:checked:not(:disabled)'))
+    .map(c => c.dataset.id);
   if (!ids.length) return addLog('请至少勾选一个岗位', 'error');
+  const live = $('runMode').value === 'live';
+  if (live) {
+    const names = ids.map(id => {
+      const job = currentScreened.find(item => item.id === id);
+      return job ? job.name + ' - ' + (job.company || '公司未知') : id;
+    });
+    const confirmed = window.confirm(
+      '即将正式投递 ' + ids.length + ' 个岗位：\n\n' + names.join('\n')
+        + '\n\n发送前会再次校验；任一失败将立即停止。确认继续？'
+    );
+    if (!confirmed) return addLog('已取消正式投递', 'warn');
+  }
   setRunning(true);
-  addLog('开始投递 ' + ids.length + ' 个岗位', 'info');
-  chrome.runtime.sendMessage({ type: 'START_DELIVER', jobIds: ids });
+  addLog((live ? '开始正式投递 ' : '开始完整预演 ') + ids.length + ' 个岗位', 'info');
+  chrome.runtime.sendMessage({ type: live ? 'START_DELIVER' : 'START_PREVIEW', jobIds: ids });
 });
 
 $('btnPause').addEventListener('click', () => {
@@ -299,17 +340,24 @@ function setRunning(running) {
 
 // 渲染审核列表
 function renderReview(screened) {
+  currentScreened = screened || [];
+  const live = $('runMode').value === 'live';
   const matched = screened.filter(j => j.filterStatus === 'pass' && j.match);
   const pending = screened.filter(j => j.filterStatus === 'pending');
   const skipped = screened.filter(j => j.filterStatus === 'fail' || (j.filterStatus === 'pass' && !j.match));
   $('reviewCount').textContent = '匹配 ' + matched.length + ' · 待确认 ' + pending.length + ' / ' + screened.length;
   let html = '';
   matched.forEach(j => {
-    html += '<div class="job-item"><input type="checkbox" checked data-id="' + esc(j.id) + '">'
+    const preview = currentPreviews[j.id];
+    const ready = preview && preview.status === 'ready';
+    const disabled = live && !ready;
+    html += '<div class="job-item' + (disabled ? ' skip' : '') + '"><input type="checkbox" '
+      + (disabled ? 'disabled ' : 'checked ') + 'data-id="' + esc(j.id) + '">'
       + '<div class="job-main"><div class="job-title">' + esc(j.name) + '</div>'
       + '<div class="job-sub">' + esc(jobFactsText(j)) + '</div>'
       + '<div class="job-reason m">✓ ' + esc((j.filterReasons || []).join('；'))
-      + (j.reason ? '；AI：' + esc(j.reason) : '') + '</div></div></div>';
+      + (j.reason ? '；AI：' + esc(j.reason) : '') + '</div>'
+      + previewHtml(preview, live) + '</div></div>';
   });
   pending.forEach(j => {
     html += '<div class="job-item pending"><div class="job-main"><div class="job-title">' + esc(j.name) + '</div>'
@@ -327,6 +375,15 @@ function renderReview(screened) {
   $('reviewList').innerHTML = html || '<div class="job-sub">无岗位</div>';
   $('reviewCard').style.display = 'block';
 }
+function previewHtml(preview, live) {
+  if (preview && preview.status === 'ready') {
+    return '<div class="preview-text"><strong>预演招呼语：</strong>' + esc(preview.greeting) + '</div>';
+  }
+  if (preview && preview.status === 'failed') {
+    return '<div class="preview-text failed">预演失败：' + esc(preview.error || '未知错误') + '</div>';
+  }
+  return live ? '<div class="preview-text failed">需先完成模拟运行</div>' : '';
+}
 function jobFactsText(job) {
   return [
     job.company || '公司未知',
@@ -342,12 +399,28 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'LOG') addLog(msg.text, msg.level);
   if (msg.type === 'PROGRESS') $('progText').textContent = (msg.label ? msg.label + ' ' : '') + msg.cur + '/' + msg.total;
   if (msg.type === 'PHASE') {
-    const map = { idle: '未开始', collecting: '收集中', screening: 'AI筛选中', review: '待审核', delivering: '投递中', done: '已完成' };
+    const map = {
+      idle: '未开始', collecting: '收集中', screening: 'AI筛选中',
+      previewing: '完整预演中', review: '待审核', delivering: '正式投递中', done: '已完成'
+    };
     $('phaseText').textContent = map[msg.phase] || msg.phase;
     if (msg.phase === 'review' || msg.phase === 'done' || msg.phase === 'idle') setRunning(false);
   }
   if (msg.type === 'SCREENED') renderReview(msg.screened);
-  if (msg.type === 'DONE') { setRunning(false); $('progText').textContent = ''; }
+  if (msg.type === 'PREVIEWED') {
+    currentPreviews = msg.previews || {};
+    currentLastBatch = msg.lastBatch || null;
+    renderReview(currentScreened);
+    setRunning(false);
+    $('progText').textContent = '';
+  }
+  if (msg.type === 'DONE') {
+    currentLastBatch = msg.lastBatch || null;
+    $('runMode').value = 'preview';
+    updateRunModeUI();
+    setRunning(false);
+    $('progText').textContent = '';
+  }
 });
 
 function addLog(text, level) {

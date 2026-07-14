@@ -69,8 +69,8 @@ confirmPending(job, config)
 
 ### 任务 4：完整预演与投递安全
 
-- [ ] 创建 `tests/workflow-safety.test.js`，覆盖身份匹配、缺失字段、明确不匹配、人工确认、预演资格、正式运行资格和已投岗位阻止。
-- [ ] 创建 `workflow-safety.js`，导出：
+- [x] 创建 `tests/workflow-safety.test.js`，覆盖身份匹配、缺失字段、明确不匹配、人工确认、预演资格、正式运行资格和已投岗位阻止。
+- [x] 创建 `workflow-safety.js`，导出：
 
 ```javascript
 verifyIdentity(expected, actual)
@@ -78,13 +78,13 @@ verifyEligibility(job, currentJob, filterConfig, processed)
 canDeliver(jobId, previews, processed)
 ```
 
-- [ ] 内容脚本的详情读取返回当前岗位快照与完整 JD；建立沟通仍保持独立消息。
-- [ ] 后台增加 `previews` 和 `lastBatch` 持久状态，以及 `START_PREVIEW` 路径；该路径不得发送 `GO_CHAT` 或 `SEND_ACTIVE`。
-- [ ] 侧边栏增加不持久化的 `preview/live` 选择，默认 preview；展示预演招呼语和校验结果。
-- [ ] 正式运行只接受 ready preview，并通过一次原生批次确认；发送前重新读取详情和调用 `verifyEligibility`。
-- [ ] 任一失败写入 lastBatch 后 `break`，剩余项记录为未执行，不自动重试。
-- [ ] 扩展集成测试静态断言预演无沟通消息、正式运行有双重安全门且失败即停。
-- [ ] 运行全量检查，勾选第三阶段并提交、推送。
+- [x] 内容脚本的详情读取返回当前岗位快照与完整 JD；建立沟通仍保持独立消息。
+- [x] 后台增加 `previews` 和 `lastBatch` 持久状态，以及 `START_PREVIEW` 路径；该路径不得发送 `GO_CHAT` 或 `SEND_ACTIVE`。
+- [x] 侧边栏增加不持久化的 `preview/live` 选择，默认 preview；展示预演招呼语和校验结果。
+- [x] 正式运行只接受 ready preview，并通过一次原生批次确认；发送前重新读取详情和调用 `verifyEligibility`。
+- [x] 任一失败写入 lastBatch 后 `break`，剩余项记录为未执行，不自动重试。
+- [x] 扩展集成测试静态断言预演无沟通消息、正式运行有双重安全门且失败即停。
+- [x] 运行全量检查，勾选第三阶段并提交、推送。
 
 ### 任务 5：本地岗位进度管理
 

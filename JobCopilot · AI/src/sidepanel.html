@@ -77,6 +77,12 @@
   <section class="card">
     <div class="card-h"><span>② 运行</span></div>
     <div class="card-b">
+      <label>运行模式</label>
+      <select id="runMode">
+        <option value="preview" selected>模拟运行（不沟通、不发送）</option>
+        <option value="live">正式投递（仅限预演成功岗位）</option>
+      </select>
+      <div class="run-mode-hint" id="runModeHint">默认安全模式：读取完整 JD、二次校验并生成招呼语，不会建立沟通。</div>
       <button class="btn-go" id="btnCollect">开始收集 + AI筛选</button>
       <div class="status-row">
         <span id="phaseText">未开始</span>
@@ -96,7 +102,7 @@
     <div class="card-b">
       <div class="review-tools">
         <label class="mini"><input type="checkbox" id="selAll" checked> 全选匹配</label>
-        <button class="btn-go" id="btnDeliver">投递选中</button>
+        <button class="btn-go" id="btnDeliver">预演选中岗位</button>
       </div>
       <div id="reviewList"></div>
     </div>

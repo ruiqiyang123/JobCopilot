@@ -93,3 +93,38 @@ test('岗位硬筛选在 AI 筛选前执行，并提供可配置 UI 和人工确
     ['src/selectors.js', 'src/job-filters.js']
   );
 });
+
+test('模拟运行与正式投递使用独立路径和双重安全门', () => {
+  const background = read('src/background.js');
+  const sidepanelHtml = read('src/sidepanel.html');
+  const sidepanelJs = read('src/sidepanel.js');
+  const contentSearch = read('src/content-search.js');
+
+  assert.match(background, /importScripts\([^)]*workflow-safety\.js/);
+  assert.match(background, /START_PREVIEW/);
+  assert.match(background, /WorkflowSafety\.canDeliver/);
+  assert.match(background, /WorkflowSafety\.verifyEligibility/);
+  assert.match(background, /sw_previews/);
+  assert.match(background, /lastBatch/);
+
+  const previewStart = background.indexOf('async function runPreview');
+  const deliverStart = background.indexOf('async function runDeliver', previewStart);
+  const previewBody = background.slice(previewStart, deliverStart);
+  assert.ok(previewStart >= 0 && deliverStart > previewStart, '缺少独立的 runPreview');
+  assert.doesNotMatch(previewBody, /GO_CHAT|SEND_ACTIVE|goChat/);
+  assert.match(previewBody, /genGreetingFromJD/);
+  assert.match(previewBody, /verifyEligibility/);
+
+  const deliverEnd = background.indexOf('function recordOk', deliverStart);
+  const deliverBody = background.slice(deliverStart, deliverEnd);
+  assert.match(deliverBody, /GO_CHAT/);
+  assert.match(deliverBody, /SEND_ACTIVE/);
+  assert.match(deliverBody, /break/);
+
+  assert.match(sidepanelHtml, /id="runMode"/);
+  assert.match(sidepanelHtml, /option value="preview" selected/);
+  assert.match(sidepanelHtml, /option value="live"/);
+  assert.match(sidepanelJs, /window\.confirm/);
+  assert.match(sidepanelJs, /START_PREVIEW/);
+  assert.match(contentSearch, /currentJob/);
+});

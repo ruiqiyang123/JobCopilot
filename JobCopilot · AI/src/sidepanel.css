@@ -41,6 +41,8 @@ input[type=file] { width: 100%; font-size: 12px; }
 .filter-options.disabled { opacity: .45; }
 
 .status-row { display: flex; justify-content: space-between; margin-top: 10px; font-weight: 600; }
+.run-mode-hint { margin-top: 5px; padding: 6px 8px; border-radius: 5px; background: #edf8fd; color: #28718f; font-size: 11.5px; line-height: 1.4; }
+.run-mode-hint.live { background: #fff1f0; color: #b42318; }
 #phaseText { color: #00a0e9; } #progText { color: #888; }
 .ctrl { display: flex; gap: 6px; margin-top: 8px; }
 .ctrl button { flex: 1; padding: 7px; border: 1px solid #d6dbe0; border-radius: 6px; background: #fff; cursor: pointer; font-size: 12px; }
@@ -60,6 +62,8 @@ input[type=file] { width: 100%; font-size: 12px; }
 .job-reason.m { color: #2b8a3e; } .job-reason.s { color: #c92a2a; }
 .job-item.pending { background: #fff8e6; }
 .job-reason.p { color: #a45d00; }
+.preview-text { margin-top: 5px; padding: 6px; border-radius: 4px; background: #f2f8f3; color: #275d35; font-size: 11.5px; line-height: 1.45; }
+.preview-text.failed { background: #fff1f0; color: #b42318; }
 .btn-confirm-filter { margin-top: 5px; padding: 4px 8px; border: 1px solid #d88a16; border-radius: 4px; background: #fff; color: #8a5100; cursor: pointer; font-size: 11px; }
 .btn-confirm-filter:disabled { opacity: .55; cursor: wait; }
 
