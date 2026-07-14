@@ -1,9 +1,9 @@
 // ===== BOSS自动投递 Service Worker：编排 收集→筛选→审核→投递 + 可配置 LLM =====
-importScripts('/src/selectors.js', '/src/llm-client.js'); // SW 需要城市映射和模型客户端
+importScripts('/src/selectors.js', '/src/job-filters.js', '/src/llm-client.js'); // SW 需要城市、筛选和模型模块
 
 const CFG_KEYS = [
   'llmProvider', 'llmApiKey', 'llmBaseUrl', 'llmModel', 'llmAuthType', 'dsKey',
-  'resumeText', 'resumeImage', 'city', 'keyword', 'count'
+  'resumeText', 'resumeImage', 'city', 'keyword', 'count', 'jobFilterConfig'
 ];
 
 let state = {
@@ -30,8 +30,22 @@ async function getCfg() {
   return Object.assign({}, stored, migrated);
 }
 function resumeFull(cfg) { return (cfg.resumeText || '').trim(); }
-function jobInfo(j) { return '岗位：' + (j.name || '') + '\n技能标签：' + ((j.tags || []).join('、')) + '\n薪资：' + (j.salary || '') + '\n公司：' + (j.company || ''); }
+function jobInfo(j) {
+  return '岗位：' + (j.name || '')
+    + '\n技能标签：' + ((j.tags || []).join('、'))
+    + '\n薪资：' + (j.salary || '')
+    + '\n公司：' + (j.company || '')
+    + '\n工作经验：' + JobFilters.labelFor('experience', j.experience)
+    + '\n公司规模：' + JobFilters.labelFor('companySize', j.companySize);
+}
 function findJob(id) { for (var i = 0; i < state.jobs.length; i++) if (state.jobs[i].id === id) return state.jobs[i]; return null; }
+function hardFilterJob(job, cfg) {
+  return Object.assign({}, job, JobFilters.evaluate(job, cfg.jobFilterConfig));
+}
+function blockedScreenResult(job) {
+  const prefix = job.filterStatus === 'pending' ? '待人工确认：' : '硬筛选排除：';
+  return Object.assign({}, job, { match: false, reason: prefix + (job.filterReasons || []).join('；') });
+}
 
 // ── 可配置模型 ──
 function llmConfigFrom(cfg) {
@@ -94,7 +108,12 @@ async function testLLMConnection(config) {
 
 // ── tab 注入 + 发消息 ──
 async function ensureInjected(tabId, file) {
-  try { await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['src/selectors.js', file] }); } catch (e) {}
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      files: ['src/selectors.js', 'src/job-filters.js', file]
+    });
+  } catch (e) {}
 }
 function sendToTab(tabId, msg) {
   return new Promise((resolve) => {
@@ -154,19 +173,30 @@ async function runCollect() {
   await ensureInjected(tab.id, 'src/content-search.js');
   const r = await sendToTab(tab.id, { type: 'SCRAPE', count: count });
   if (!r || !r.success) { log('收集失败：' + (r && r.error), 'error'); state.phase = 'idle'; pushPhase(); return; }
-  state.jobs = r.jobs || [];
+  try {
+    JobFilters.normalizeConfig(cfg.jobFilterConfig);
+  } catch (error) {
+    log(error.message, 'error'); state.phase = 'idle'; pushPhase(); return;
+  }
+  state.jobs = (r.jobs || []).map(job => hardFilterJob(job, cfg));
   log('收集到 ' + state.jobs.length + ' 个岗位', 'success');
   if (!state.jobs.length) { state.phase = 'idle'; pushPhase(); return; }
 
-  // 筛选（并发3）
+  // 硬筛选先于 AI：不匹配和信息不完整的岗位不会消耗模型额度
   state.phase = 'screening'; pushPhase();
+  const eligibleJobs = state.jobs.filter(job => job.filterStatus === 'pass');
+  const blockedJobs = state.jobs.filter(job => job.filterStatus !== 'pass');
+  state.screened = blockedJobs.map(blockedScreenResult);
+  log('硬筛选：通过 ' + eligibleJobs.length + '，排除 '
+    + blockedJobs.filter(job => job.filterStatus === 'fail').length + '，待确认 '
+    + blockedJobs.filter(job => job.filterStatus === 'pending').length);
   log('AI 筛选中（' + providerNameFrom(cfg) + '）...');
-  let done = 0; const total = state.jobs.length;
-  progress(0, total, '筛选');
+  let done = blockedJobs.length; const total = state.jobs.length;
+  progress(done, total, '筛选');
   const CONC = 3;
-  for (let i = 0; i < state.jobs.length; i += CONC) {
+  for (let i = 0; i < eligibleJobs.length; i += CONC) {
     if (state.aborted) break; await waitIfPaused();
-    const batch = state.jobs.slice(i, i + CONC);
+    const batch = eligibleJobs.slice(i, i + CONC);
     await Promise.all(batch.map(async (job) => {
       let res;
       try { res = await screenJob(cfg, job); }
@@ -183,6 +213,35 @@ async function runCollect() {
   chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
 }
 
+async function confirmFilterPending(jobId) {
+  if (!state.jobs.length || !state.screened.length) {
+    const saved = await chrome.storage.local.get(['sw_jobs', 'sw_screened']);
+    state.jobs = saved.sw_jobs || [];
+    state.screened = saved.sw_screened || [];
+  }
+  const cfg = await getCfg();
+  const index = state.jobs.findIndex(job => job.id === jobId);
+  if (index < 0) throw new Error('找不到待确认岗位');
+
+  const confirmed = JobFilters.confirmPending(state.jobs[index], cfg.jobFilterConfig);
+  let aiResult;
+  try { aiResult = await screenJob(cfg, confirmed); }
+  catch (error) { aiResult = { match: false, reason: '筛选异常:' + error.message }; }
+
+  state.jobs[index] = confirmed;
+  const screenedJob = Object.assign({}, confirmed, {
+    match: aiResult.match,
+    reason: (confirmed.filterReasons || []).join('；') + '；AI：' + aiResult.reason
+  });
+  const screenedIndex = state.screened.findIndex(job => job.id === jobId);
+  if (screenedIndex >= 0) state.screened[screenedIndex] = screenedJob;
+  else state.screened.push(screenedJob);
+
+  await chrome.storage.local.set({ sw_jobs: state.jobs, sw_screened: state.screened });
+  chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
+  return { screened: state.screened, job: screenedJob };
+}
+
 // ── 流程：投递（单个闭环：建联→进聊天页→发图片+招呼语→回搜索页→下一个）──
 async function runDeliver(jobIds) {
   state.aborted = false; state.paused = false; state.results = [];
@@ -192,7 +251,10 @@ async function runDeliver(jobIds) {
   const cfg = await getCfg();
   if (!cfg.resumeImage) log('未上传简历图片，将只发招呼语', 'warn');
 
-  const ids = (jobIds || []).filter(id => !state.processed[id]);
+  const ids = (jobIds || []).filter(id => {
+    const job = findJob(id);
+    return job && job.filterStatus === 'pass' && !state.processed[id];
+  });
   if (!ids.length) { log('没有可投递的岗位（可能已投过，可点重置）', 'warn'); finishDeliver(); return; }
   const searchUrl = buildSearchUrl(cfg);
 
@@ -251,6 +313,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     testLLMConnection(msg.config || {})
       .then(result => sendResponse({ ok: true, result: result }))
       .catch(error => sendResponse({ ok: false, error: error && error.message ? error.message : '模型连接失败' }));
+    return true;
+  }
+  if (msg.type === 'CONFIRM_FILTER_PENDING') {
+    confirmFilterPending(msg.jobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error && error.message ? error.message : '人工确认失败' }));
     return true;
   }
   if (msg.type === 'PAUSE') { state.paused = true; log('已暂停', 'warn'); sendResponse({ ok: true }); return; }

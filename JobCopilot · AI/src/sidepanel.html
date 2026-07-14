@@ -58,6 +58,16 @@
       <label>收集岗位数量</label>
       <input type="number" id="count" value="20" min="1" max="200">
 
+      <div class="filter-group">
+        <label class="filter-toggle"><input type="checkbox" id="experienceFilterEnabled" checked> 启用工作经验筛选</label>
+        <div class="filter-options" id="experienceFilterOptions"></div>
+      </div>
+
+      <div class="filter-group">
+        <label class="filter-toggle"><input type="checkbox" id="companySizeFilterEnabled" checked> 启用公司规模筛选</label>
+        <div class="filter-options" id="companySizeFilterOptions"></div>
+      </div>
+
       <button class="btn-primary" id="saveCfg">保存配置</button>
       <span id="saved" class="ok-msg" style="display:none">✓ 已保存</span>
     </div>
@@ -99,6 +109,7 @@
   </section>
 
   <script src="llm-client.js"></script>
+  <script src="job-filters.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

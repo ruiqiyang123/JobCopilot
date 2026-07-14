@@ -18,7 +18,7 @@
   "content_scripts": [
     {
       "matches": ["*://*.zhipin.com/web/geek/job*"],
-      "js": ["src/selectors.js", "src/content-search.js"],
+      "js": ["src/selectors.js", "src/job-filters.js", "src/content-search.js"],
       "run_at": "document_idle"
     },
     {

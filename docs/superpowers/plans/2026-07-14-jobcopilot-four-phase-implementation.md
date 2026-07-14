@@ -49,9 +49,9 @@ longcat: {
 
 ### 任务 3：可配置岗位硬筛选
 
-- [ ] 创建 `tests/job-filters.test.js`，覆盖七档经验、六档公司规模、默认配置、开关、空选择、pass/fail/pending 和 pending 人工确认。
-- [ ] 运行定向测试，确认因模块不存在失败。
-- [ ] 创建 `job-filters.js`，导出：
+- [x] 创建 `tests/job-filters.test.js`，覆盖七档经验、六档公司规模、默认配置、开关、空选择、pass/fail/pending 和 pending 人工确认。
+- [x] 运行定向测试，确认因模块不存在失败。
+- [x] 创建 `job-filters.js`，导出：
 
 ```javascript
 getDefaultConfig()
@@ -61,11 +61,11 @@ evaluate(job, config)
 confirmPending(job, config)
 ```
 
-- [ ] 在内容脚本采集 `experience`、`companySize`，在后台 AI 调用前执行 `evaluate`。
-- [ ] 在侧边栏增加两个可关闭的分类多选组，保存单一 `jobFilterConfig` 对象；启用且空选时阻止保存。
-- [ ] 审核列表分为通过、待人工确认、排除；人工确认消息只允许 pending 岗位进入 AI 筛选。
-- [ ] 更新 Manifest/脚本加载顺序、集成测试和 README。
-- [ ] 运行全量测试、语法/JSON/密钥检查，勾选第二阶段并提交、推送。
+- [x] 在内容脚本采集 `experience`、`companySize`，在后台 AI 调用前执行 `evaluate`。
+- [x] 在侧边栏增加两个可关闭的分类多选组，保存单一 `jobFilterConfig` 对象；启用且空选时阻止保存。
+- [x] 审核列表分为通过、待人工确认、排除；人工确认消息只允许 pending 岗位进入 AI 筛选。
+- [x] 更新 Manifest/脚本加载顺序、集成测试和 README。
+- [x] 运行全量测试、语法/JSON/密钥检查，勾选第二阶段并提交、推送。
 
 ### 任务 4：完整预演与投递安全
 

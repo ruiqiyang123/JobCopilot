@@ -14,17 +14,25 @@
     const link = linkEl ? linkEl.href : '';
     const m = link.match(/job_detail\/([^.?]+)\.html/);
     const id = (m && m[1]) || ((nameEl ? nameEl.textContent.trim() : '') + '|' + (salEl ? salEl.textContent.trim() : ''));
-    const tags = Array.from(card.querySelectorAll(SELECTORS.jobs.tagList)).map(t => t.textContent.trim()).filter(Boolean);
+    const tagNodes = card.querySelectorAll(
+      SELECTORS.jobs.tagList + ', .company-tag-list li, [class*="company-tag"] li, .company-info li'
+    );
+    const tags = Array.from(tagNodes).map(t => t.textContent.trim()).filter(Boolean)
+      .filter((value, index, values) => values.indexOf(value) === index);
     let company = '';
     const compEl = card.querySelector('.company-name a, .company-name, [class*="company-name"], .boss-info .company-name, .company-info a, [class*="company"] a');
     if (compEl) company = compEl.textContent.trim();
+    const facts = JobFilters.extractFacts(tags.concat([(card.innerText || '').trim()]));
     return {
       id: id,
       name: nameEl ? nameEl.textContent.trim() : '未知岗位',
       salary: salEl ? salEl.textContent.trim() : '',
       tags: tags,
       company: company,
-      link: link
+      link: link,
+      experience: facts.experience,
+      companySize: facts.companySize,
+      manualOverride: false
     };
   }
 
@@ -97,7 +105,11 @@
       const secs = document.querySelectorAll('.job-sec-text, [class*="job-sec"], [class*="job-desc"]');
       jd = Array.from(secs).map(s => (s.innerText || '').trim()).filter(Boolean).join('\n');
     }
-    return { success: true, jd: jd.slice(0, 1800) };
+    const currentJob = parseCard(card);
+    const facts = JobFilters.extractFacts([jd, card.innerText || '']);
+    if (facts.experience) currentJob.experience = facts.experience;
+    if (facts.companySize) currentJob.companySize = facts.companySize;
+    return { success: true, jd: jd.slice(0, 1800), currentJob: currentJob };
   }
 
   // 卡片已打开 → 点立即沟通 → 弹窗点"继续沟通"（跳转聊天页）

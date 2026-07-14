@@ -2,7 +2,7 @@
 const $ = (id) => document.getElementById(id);
 const BASIC_CFG_FIELDS = ['resumeText', 'keyword', 'city', 'count'];
 const LLM_STORAGE_FIELDS = ['llmProvider', 'llmApiKey', 'llmBaseUrl', 'llmModel', 'llmAuthType'];
-const LOAD_FIELDS = BASIC_CFG_FIELDS.concat(LLM_STORAGE_FIELDS, ['resumeImage', 'dsKey']);
+const LOAD_FIELDS = BASIC_CFG_FIELDS.concat(LLM_STORAGE_FIELDS, ['resumeImage', 'dsKey', 'jobFilterConfig']);
 
 // 折叠
 document.querySelectorAll('.card-h[data-toggle]').forEach(h => {
@@ -37,6 +37,57 @@ function applyProviderUI(forceDefaults) {
   }
 }
 
+function renderFilterOptions(containerId, kind, options) {
+  $(containerId).innerHTML = options.map(option =>
+    '<label class="filter-option"><input type="checkbox" data-filter-kind="' + kind
+      + '" value="' + esc(option.value) + '"> ' + esc(option.label) + '</label>'
+  ).join('');
+}
+
+function setFilterValues(kind, values) {
+  const selected = Array.isArray(values) ? values : [];
+  document.querySelectorAll('[data-filter-kind="' + kind + '"]').forEach(input => {
+    input.checked = selected.indexOf(input.value) >= 0;
+  });
+}
+
+function syncFilterEnabled(kind) {
+  const enabledId = kind === 'experience' ? 'experienceFilterEnabled' : 'companySizeFilterEnabled';
+  const optionsId = kind === 'experience' ? 'experienceFilterOptions' : 'companySizeFilterOptions';
+  const enabled = $(enabledId).checked;
+  $(optionsId).classList.toggle('disabled', !enabled);
+  document.querySelectorAll('[data-filter-kind="' + kind + '"]').forEach(input => { input.disabled = !enabled; });
+}
+
+function applyJobFilterConfig(config) {
+  let normalized;
+  try { normalized = JobFilters.normalizeConfig(config); }
+  catch (error) { normalized = JobFilters.getDefaultConfig(); }
+  $('experienceFilterEnabled').checked = normalized.experienceEnabled;
+  $('companySizeFilterEnabled').checked = normalized.companySizeEnabled;
+  setFilterValues('experience', normalized.experienceValues);
+  setFilterValues('companySize', normalized.companySizeValues);
+  syncFilterEnabled('experience');
+  syncFilterEnabled('companySize');
+}
+
+function checkedFilterValues(kind) {
+  return Array.from(document.querySelectorAll('[data-filter-kind="' + kind + '"]:checked'))
+    .map(input => input.value);
+}
+
+function readJobFilterForm() {
+  return JobFilters.normalizeConfig({
+    experienceEnabled: $('experienceFilterEnabled').checked,
+    experienceValues: checkedFilterValues('experience'),
+    companySizeEnabled: $('companySizeFilterEnabled').checked,
+    companySizeValues: checkedFilterValues('companySize')
+  });
+}
+
+renderFilterOptions('experienceFilterOptions', 'experience', JobFilters.EXPERIENCE_OPTIONS);
+renderFilterOptions('companySizeFilterOptions', 'companySize', JobFilters.COMPANY_SIZE_OPTIONS);
+
 async function loadConfig() {
   const stored = await chrome.storage.local.get(LOAD_FIELDS);
   const migrated = LLMClient.migrateStoredConfig(stored);
@@ -52,6 +103,7 @@ async function loadConfig() {
   $('llmModel').value = data.llmModel || '';
   $('llmAuthType').value = data.llmAuthType || 'bearer';
   applyProviderUI(false);
+  applyJobFilterConfig(data.jobFilterConfig);
   if (data.resumeImage) showImg(data.resumeImage);
 }
 
@@ -119,6 +171,7 @@ async function persistCurrentConfig() {
   if (!granted) throw new Error('未授权访问该模型接口域名');
 
   const data = llmStorageFrom(normalized);
+  data.jobFilterConfig = readJobFilterForm();
   BASIC_CFG_FIELDS.forEach(field => {
     data[field] = $(field).value.trim ? $(field).value.trim() : $(field).value;
   });
@@ -152,6 +205,9 @@ $('llmProvider').addEventListener('change', () => {
   applyProviderUI(true);
   setLLMTestStatus('', '');
 });
+
+$('experienceFilterEnabled').addEventListener('change', () => syncFilterEnabled('experience'));
+$('companySizeFilterEnabled').addEventListener('change', () => syncFilterEnabled('companySize'));
 
 $('saveCfg').addEventListener('click', async () => {
   try {
@@ -213,7 +269,25 @@ $('btnReset').addEventListener('click', () => { chrome.runtime.sendMessage({ typ
 $('clearLog').addEventListener('click', () => { $('log').innerHTML = ''; });
 
 $('selAll').addEventListener('change', (e) => {
-  document.querySelectorAll('.job-item:not(.skip) input').forEach(c => c.checked = e.target.checked);
+  document.querySelectorAll('.job-item:not(.skip):not(.pending) input[type=checkbox]')
+    .forEach(c => { c.checked = e.target.checked; });
+});
+
+$('reviewList').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-action="confirm-filter"]');
+  if (!button) return;
+  button.disabled = true;
+  button.textContent = '确认中…';
+  try {
+    const response = await runtimeMessage({ type: 'CONFIRM_FILTER_PENDING', jobId: button.dataset.id });
+    if (!response.ok) throw new Error(response.error || '人工确认失败');
+    renderReview(response.result.screened || []);
+    addLog('已人工确认岗位信息，完成 AI 筛选', 'success');
+  } catch (error) {
+    addLog(error.message, 'error');
+    button.disabled = false;
+    button.textContent = '确认符合并进行 AI 筛选';
+  }
 });
 
 function setRunning(running) {
@@ -225,26 +299,43 @@ function setRunning(running) {
 
 // 渲染审核列表
 function renderReview(screened) {
-  const matched = screened.filter(j => j.match);
-  const skipped = screened.filter(j => !j.match);
-  $('reviewCount').textContent = '匹配 ' + matched.length + ' / ' + screened.length;
+  const matched = screened.filter(j => j.filterStatus === 'pass' && j.match);
+  const pending = screened.filter(j => j.filterStatus === 'pending');
+  const skipped = screened.filter(j => j.filterStatus === 'fail' || (j.filterStatus === 'pass' && !j.match));
+  $('reviewCount').textContent = '匹配 ' + matched.length + ' · 待确认 ' + pending.length + ' / ' + screened.length;
   let html = '';
   matched.forEach(j => {
     html += '<div class="job-item"><input type="checkbox" checked data-id="' + esc(j.id) + '">'
       + '<div class="job-main"><div class="job-title">' + esc(j.name) + '</div>'
-      + '<div class="job-sub">' + esc(j.company) + ' · ' + esc(j.salary) + '</div>'
-      + '<div class="job-reason m">✓ ' + esc(j.reason) + '</div></div></div>';
+      + '<div class="job-sub">' + esc(jobFactsText(j)) + '</div>'
+      + '<div class="job-reason m">✓ ' + esc((j.filterReasons || []).join('；'))
+      + (j.reason ? '；AI：' + esc(j.reason) : '') + '</div></div></div>';
+  });
+  pending.forEach(j => {
+    html += '<div class="job-item pending"><div class="job-main"><div class="job-title">' + esc(j.name) + '</div>'
+      + '<div class="job-sub">' + esc(jobFactsText(j)) + '</div>'
+      + '<div class="job-reason p">⚠ ' + esc((j.filterReasons || []).join('；')) + '</div>'
+      + '<button type="button" class="btn-confirm-filter" data-action="confirm-filter" data-id="' + esc(j.id)
+      + '">确认符合并进行 AI 筛选</button></div></div>';
   });
   skipped.forEach(j => {
     html += '<div class="job-item skip"><input type="checkbox" disabled data-id="' + esc(j.id) + '">'
       + '<div class="job-main"><div class="job-title">' + esc(j.name) + '</div>'
-      + '<div class="job-sub">' + esc(j.company) + ' · ' + esc(j.salary) + '</div>'
+      + '<div class="job-sub">' + esc(jobFactsText(j)) + '</div>'
       + '<div class="job-reason s">✗ ' + esc(j.reason) + '</div></div></div>';
   });
   $('reviewList').innerHTML = html || '<div class="job-sub">无岗位</div>';
   $('reviewCard').style.display = 'block';
 }
-function esc(s) { return (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function jobFactsText(job) {
+  return [
+    job.company || '公司未知',
+    job.salary || '薪资未知',
+    '经验：' + JobFilters.labelFor('experience', job.experience),
+    '规模：' + JobFilters.labelFor('companySize', job.companySize)
+  ].join(' · ');
+}
+function esc(s) { return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 // 消息接收
 chrome.runtime.onMessage.addListener((msg) => {
