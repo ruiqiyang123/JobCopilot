@@ -14,6 +14,10 @@ let trackerRecords = [];
 let currentReviewTab = 'pending_review';
 let editingResumeImage = '';
 let currentPreviewRun = null;
+const confirmingPreviewIds = new Set();
+const regeneratingPreviewIds = new Set();
+const previewActionErrors = {};
+const previewDraftTimers = {};
 
 function esc(value) {
   return String(value || '').replace(/[&<>"]/g, character => ({
@@ -566,20 +570,47 @@ function renderPreviewItem(job, preview) {
   const aiEnabled = (preview.enabledSteps || []).indexOf('aiOpening') >= 0;
   const fixedEnabled = (preview.enabledSteps || []).indexOf('fixedMessage') >= 0;
   const imageEnabled = (preview.enabledSteps || []).indexOf('resumeImage') >= 0;
+  const confirmed = preview.status === 'confirmed';
+  const confirming = confirmingPreviewIds.has(job.id);
+  const regenerating = regeneratingPreviewIds.has(job.id);
+  const confirmDisabled = confirmed || confirming || regenerating || (aiEnabled && !String(preview.aiOpening || '').trim());
+  const confirmText = confirmed ? '✓ 已确认' : (confirming ? '确认中…' : '确认此岗位预演');
+  const actionError = previewActionErrors[job.id]
+    ? '<div class="job-reason skip">' + esc(previewActionErrors[job.id]) + '</div>' : '';
+  const confirmButton = '<button class="confirm' + (confirmed ? ' confirmed' : '') + '" data-confirm-preview="'
+    + esc(job.id) + '"' + (confirmDisabled ? ' disabled' : '') + '>' + confirmText + '</button>';
+  const regenerateButton = aiEnabled
+    ? '<button class="regenerate" data-regenerate-preview="' + esc(job.id) + '"'
+      + ((confirming || regenerating) ? ' disabled' : '') + '>'
+      + (regenerating ? '生成中…' : '重新生成 AI 开场') + '</button>'
+    : '';
   return '<article class="preview-item"><div class="job-head"><div class="job-title">' + esc(job.name) + '</div>'
-    + '<span class="preview-status ' + (preview.status === 'confirmed' ? 'confirmed' : '') + '" data-preview-status="'
-    + esc(job.id) + '">' + (preview.status === 'confirmed' ? '✓ 已确认' : '待确认') + '</span></div>'
-    + (aiEnabled ? '<label>AI 个性化开场</label><textarea rows="6" data-preview-opening="' + esc(job.id) + '">'
+    + '<span class="preview-status ' + (confirmed ? 'confirmed' : (regenerating ? 'running' : ''))
+    + '" data-preview-status="' + esc(job.id) + '">'
+    + (confirmed ? '✓ 已确认' : (regenerating ? '重新生成中…' : '待确认')) + '</span></div>'
+    + (aiEnabled ? '<label>AI 个性化开场</label><textarea rows="6" data-preview-opening="' + esc(job.id) + '"'
+      + (regenerating ? ' disabled' : '') + '>'
       + esc(preview.aiOpening) + '</textarea>' : '')
     + (fixedEnabled ? '<div class="preview-part"><strong>固定补充消息</strong>' + esc(preview.fixedMessage) + '</div>' : '')
     + (imageEnabled ? '<div class="preview-part"><strong>简历图片</strong>已绑定当前招呼方案图片</div>' : '')
-    + '<div class="preview-actions"><button class="confirm" data-confirm-preview="' + esc(job.id) + '">确认此岗位预演</button></div>'
+    + actionError
+    + '<div class="preview-actions">' + confirmButton + regenerateButton + '</div>'
     + '</article>';
 }
 
 function confirmedApprovedJobs() {
   return normalizedJobs().filter(job => job.reviewStatus === 'approved'
     && currentPreviews[job.id] && currentPreviews[job.id].status === 'confirmed');
+}
+
+function renderDeliveryControls(ready) {
+  $('previewSummary').textContent = ready.length + ' 个已确认';
+  $('btnDeliver').disabled = ready.length === 0;
+  $('btnDeliver').textContent = ready.length ? '正式投递 ' + ready.length + ' 个已批准岗位' : '暂无可正式投递岗位';
+  $('deliverDisabledReason').textContent = ready.length
+    ? '将严格按预演内容发送，任一步失败立即停止'
+    : '需要先批准岗位并确认预演';
+  $('deliverDisabledReason').classList.toggle('disabled-reason', ready.length === 0);
 }
 
 function renderPreviews() {
@@ -589,15 +620,9 @@ function renderPreviews() {
     ? approved.map(job => renderPreviewItem(job, currentPreviews[job.id])).join('')
     : '<div class="empty">批准岗位后点击“预演已批准岗位”</div>';
   const ready = confirmedApprovedJobs();
-  $('previewSummary').textContent = ready.length + ' 个已确认';
   renderPreviewButton(approved.length);
   renderPreviewRunError();
-  $('btnDeliver').disabled = ready.length === 0;
-  $('btnDeliver').textContent = ready.length ? '正式投递 ' + ready.length + ' 个已批准岗位' : '暂无可正式投递岗位';
-  $('deliverDisabledReason').textContent = ready.length
-    ? '将严格按预演内容发送，任一步失败立即停止'
-    : '需要先批准岗位并确认预演';
-  $('deliverDisabledReason').classList.toggle('disabled-reason', ready.length === 0);
+  renderDeliveryControls(ready);
 }
 
 $('previewList').addEventListener('input', event => {
@@ -605,23 +630,72 @@ $('previewList').addEventListener('input', event => {
   if (!textarea) return;
   const jobId = textarea.dataset.previewOpening;
   if (currentPreviews[jobId]) {
+    const wasConfirmed = currentPreviews[jobId].status === 'confirmed';
+    const editedAt = Date.now();
     currentPreviews[jobId] = Object.assign({}, currentPreviews[jobId], {
-      status: 'draft', aiOpening: textarea.value
+      status: 'draft', aiOpening: textarea.value, confirmedAt: 0
     });
+    previewActionErrors[jobId] = '';
     const status = document.querySelector('[data-preview-status="' + CSS.escape(jobId) + '"]');
     if (status) { status.textContent = '内容已修改，需重新确认'; status.className = 'preview-status failed'; }
-    const ready = confirmedApprovedJobs();
-    $('previewSummary').textContent = ready.length + ' 个已确认';
-    $('btnDeliver').disabled = ready.length === 0;
+    const confirmButton = document.querySelector('[data-confirm-preview="' + CSS.escape(jobId) + '"]');
+    if (confirmButton) {
+      confirmButton.textContent = '确认此岗位预演';
+      confirmButton.className = 'confirm';
+      confirmButton.disabled = !textarea.value.trim();
+    }
+    renderDeliveryControls(confirmedApprovedJobs());
+    if (wasConfirmed) {
+      runtimeMessage({
+        type: 'UPDATE_PREVIEW_DRAFT', jobId: jobId, aiOpening: textarea.value, editedAt: editedAt
+      }).then(response => {
+        if (!response.ok) throw new Error(response.error || '预演草稿保存失败');
+      }).catch(error => addLog(error.message, 'error'));
+    }
+    clearTimeout(previewDraftTimers[jobId]);
+    previewDraftTimers[jobId] = setTimeout(() => {
+      runtimeMessage({
+        type: 'UPDATE_PREVIEW_DRAFT', jobId: jobId, aiOpening: textarea.value, editedAt: editedAt
+      }).then(response => {
+        if (!response.ok) throw new Error(response.error || '预演草稿保存失败');
+      }).catch(error => {
+        previewActionErrors[jobId] = error.message;
+        addLog(error.message, 'error');
+      });
+    }, 400);
   }
 });
 
 $('previewList').addEventListener('click', async event => {
+  const regenerateButton = event.target.closest('[data-regenerate-preview]');
+  if (regenerateButton) {
+    const jobId = regenerateButton.dataset.regeneratePreview;
+    if (!window.confirm('将覆盖当前 AI 开场，并产生一次模型调用。确认重新生成？')) return;
+    clearTimeout(previewDraftTimers[jobId]);
+    regeneratingPreviewIds.add(jobId);
+    previewActionErrors[jobId] = '';
+    renderPreviews();
+    try {
+      const response = await runtimeMessage({ type: 'REGENERATE_PREVIEW', jobId: jobId });
+      if (!response.ok) throw new Error(response.error || 'AI 开场重新生成失败');
+      currentPreviews = response.result.previews || currentPreviews;
+    } catch (error) {
+      previewActionErrors[jobId] = error.message;
+      addLog(error.message, 'error');
+    } finally {
+      regeneratingPreviewIds.delete(jobId);
+      renderPreviews();
+    }
+    return;
+  }
   const button = event.target.closest('[data-confirm-preview]');
   if (!button) return;
   const jobId = button.dataset.confirmPreview;
   const textarea = document.querySelector('[data-preview-opening="' + CSS.escape(jobId) + '"]');
-  button.disabled = true;
+  clearTimeout(previewDraftTimers[jobId]);
+  confirmingPreviewIds.add(jobId);
+  previewActionErrors[jobId] = '';
+  renderPreviews();
   try {
     const response = await runtimeMessage({
       type: 'CONFIRM_PREVIEW', jobId: jobId,
@@ -629,10 +703,12 @@ $('previewList').addEventListener('click', async event => {
     });
     if (!response.ok) throw new Error(response.error || '预演确认失败');
     currentPreviews = response.result.previews || currentPreviews;
-    renderPreviews();
   } catch (error) {
+    previewActionErrors[jobId] = error.message;
     addLog(error.message, 'error');
-    button.disabled = false;
+  } finally {
+    confirmingPreviewIds.delete(jobId);
+    renderPreviews();
   }
 });
 

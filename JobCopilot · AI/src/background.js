@@ -723,6 +723,55 @@ async function confirmPreview(jobId, aiOpening) {
   return { preview: state.previews[jobId], previews: state.previews };
 }
 
+async function updatePreviewDraft(jobId, aiOpening, editedAt) {
+  await hydrateReviewState();
+  const preview = state.previews[jobId];
+  const job = findScreened(jobId);
+  if (!preview || !job) throw new Error('找不到岗位预演');
+  if (job.reviewStatus !== 'approved') throw new Error('只有已批准岗位可以编辑预演');
+  const editTime = Number(editedAt) || Date.now();
+  if (preview.confirmedAt && preview.confirmedAt >= editTime) {
+    return { preview: preview, previews: state.previews };
+  }
+  state.previews[jobId] = Object.assign({}, preview, {
+    aiOpening: String(aiOpening || ''),
+    status: 'draft',
+    confirmedAt: 0,
+    editedAt: editTime,
+    error: ''
+  });
+  await persistReviewState();
+  return { preview: state.previews[jobId], previews: state.previews };
+}
+
+async function regeneratePreviewOpening(jobId) {
+  await hydrateReviewState();
+  const preview = state.previews[jobId];
+  const job = findScreened(jobId);
+  if (!preview || !job) throw new Error('找不到岗位预演');
+  if (job.reviewStatus !== 'approved') throw new Error('只有已批准岗位可以重新生成开场');
+  if ((preview.enabledSteps || []).indexOf('aiOpening') < 0) {
+    throw new Error('当前招呼方案未启用 AI 开场');
+  }
+  const cfg = await getCfg();
+  const plan = GreetingPlans.validateForSend(selectedGreetingPlan(cfg));
+  if (plan.id !== preview.greetingPlanId) throw new Error('招呼方案已变化，请重新预演');
+  const jd = String(preview.jd || job.jd || '').trim();
+  if (!jd) throw new Error('预演缺少完整 JD，无法重新生成');
+
+  const aiOpening = await generateAiOpening(cfg, plan, job, jd);
+  const regenerated = ReviewWorkflow.regeneratePreview(
+    preview,
+    previewInputs(job, cfg, plan, jd),
+    aiOpening,
+    Date.now()
+  );
+  state.previews[jobId] = regenerated;
+  await persistReviewState();
+  log('已重新生成 ' + job.name + ' 的 AI 开场，请再次确认', 'success');
+  return { preview: regenerated, previews: state.previews };
+}
+
 // ── 正式三段式投递 ──
 async function runDeliver(jobIds) {
   state.aborted = false;
@@ -922,6 +971,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     confirmPreview(message.jobId, message.aiOpening)
       .then(result => sendResponse({ ok: true, result: result }))
       .catch(error => sendResponse({ ok: false, error: error.message || '预演确认失败' }));
+    return true;
+  }
+  if (message.type === 'UPDATE_PREVIEW_DRAFT') {
+    updatePreviewDraft(message.jobId, message.aiOpening, message.editedAt)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '预演草稿保存失败' }));
+    return true;
+  }
+  if (message.type === 'REGENERATE_PREVIEW') {
+    regeneratePreviewOpening(message.jobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || 'AI 开场重新生成失败' }));
     return true;
   }
   if (message.type === 'GET_TRACKER') {
