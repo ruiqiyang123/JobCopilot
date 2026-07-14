@@ -22,7 +22,7 @@ test('后台加载通用客户端并移除 DeepSeek 专属调用', () => {
 test('测试连接路径不调用 BOSS 收集或投递流程', () => {
   const background = read('src/background.js');
   const testConnectionStart = background.indexOf('async function testLLMConnection');
-  const nextSection = background.indexOf('// ── tab 注入', testConnectionStart);
+  const nextSection = background.indexOf('// ── 标签页与内容脚本', testConnectionStart);
   const testConnectionBody = background.slice(testConnectionStart, nextSection);
 
   assert.ok(testConnectionStart >= 0, '缺少 testLLMConnection');
@@ -94,11 +94,12 @@ test('岗位硬筛选在 AI 筛选前执行，并提供可配置 UI 和人工确
   );
 });
 
-test('模拟运行与正式投递使用独立路径和双重安全门', () => {
+test('人工批准、预演确认与正式投递使用独立路径和三重安全门', () => {
   const background = read('src/background.js');
   const sidepanelHtml = read('src/sidepanel.html');
   const sidepanelJs = read('src/sidepanel.js');
   const contentSearch = read('src/content-search.js');
+  const contentChat = read('src/content-chat.js');
 
   assert.match(background, /importScripts\([^)]*workflow-safety\.js/);
   assert.match(background, /START_PREVIEW/);
@@ -111,22 +112,69 @@ test('模拟运行与正式投递使用独立路径和双重安全门', () => {
   const deliverStart = background.indexOf('async function runDeliver', previewStart);
   const previewBody = background.slice(previewStart, deliverStart);
   assert.ok(previewStart >= 0 && deliverStart > previewStart, '缺少独立的 runPreview');
-  assert.doesNotMatch(previewBody, /GO_CHAT|SEND_ACTIVE|goChat/);
-  assert.match(previewBody, /genGreetingFromJD/);
+  assert.doesNotMatch(previewBody, /GO_CHAT|SEND_BUNDLE|goChat/);
+  assert.match(previewBody, /generateAiOpening/);
+  assert.match(previewBody, /reviewStatus === 'approved'/);
+  assert.match(previewBody, /ReviewWorkflow\.createPreview/);
   assert.match(previewBody, /verifyEligibility/);
 
-  const deliverEnd = background.indexOf('function recordOk', deliverStart);
+  const deliverEnd = background.indexOf('async function finishDeliverWithError', deliverStart);
   const deliverBody = background.slice(deliverStart, deliverEnd);
   assert.match(deliverBody, /GO_CHAT/);
-  assert.match(deliverBody, /SEND_ACTIVE/);
+  assert.match(deliverBody, /SEND_BUNDLE/);
+  assert.match(deliverBody, /ReviewWorkflow\.isPreviewReady/);
   assert.match(deliverBody, /break/);
 
-  assert.match(sidepanelHtml, /id="runMode"/);
-  assert.match(sidepanelHtml, /option value="preview" selected/);
-  assert.match(sidepanelHtml, /option value="live"/);
+  assert.doesNotMatch(sidepanelHtml, /id="runMode"/);
+  assert.match(sidepanelHtml, /id="btnPreview"/);
+  assert.match(sidepanelHtml, /id="btnDeliver"/);
+  assert.match(sidepanelHtml, /id="greetingPlanSelect"/);
   assert.match(sidepanelJs, /window\.confirm/);
   assert.match(sidepanelJs, /START_PREVIEW/);
+  assert.match(sidepanelJs, /SET_REVIEW_DECISION/);
+  assert.match(sidepanelJs, /CONFIRM_PREVIEW/);
   assert.match(contentSearch, /currentJob/);
+  assert.match(contentChat, /MessageBundle\.run/);
+});
+
+test('稳定详情链接优先于搜索页卡片，并在详情页补全字段', () => {
+  const background = read('src/background.js');
+  const contentSearch = read('src/content-search.js');
+  const manifest = JSON.parse(read('manifest.json'));
+
+  assert.match(background, /createDetailTab\(job\.detailUrl, false\)/);
+  assert.match(background, /READ_DETAIL/);
+  assert.match(background, /JobDetail\.mergeDetail/);
+  assert.match(background, /AI 使用完整 JD 筛选中/);
+  assert.match(contentSearch, /parseDetailPage/);
+  assert.match(contentSearch, /JobDetail\.canonicalizeDetailUrl/);
+  assert.ok(manifest.content_scripts[0].matches.includes('*://*.zhipin.com/job_detail/*'));
+  assert.ok(manifest.content_scripts[0].js.includes('src/job-detail.js'));
+});
+
+test('招呼方案和审核状态脚本在侧边栏与后台按依赖顺序加载', () => {
+  const background = read('src/background.js');
+  const sidepanelHtml = read('src/sidepanel.html');
+
+  assert.match(background, /importScripts\([^)]*greeting-plans\.js[^)]*review-workflow\.js/);
+  assert.ok(sidepanelHtml.indexOf('greeting-plans.js') < sidepanelHtml.indexOf('review-workflow.js'));
+  assert.ok(sidepanelHtml.indexOf('review-workflow.js') < sidepanelHtml.indexOf('sidepanel.js'));
+});
+
+test('侧边栏代码引用的静态控件全部存在，Manifest 脚本文件完整', () => {
+  const sidepanelHtml = read('src/sidepanel.html');
+  const sidepanelJs = read('src/sidepanel.js');
+  const manifest = JSON.parse(read('manifest.json'));
+  const ids = Array.from(sidepanelJs.matchAll(/\$\('([^']+)'\)/g)).map(match => match[1]);
+  Array.from(new Set(ids)).forEach(id => {
+    assert.match(sidepanelHtml, new RegExp('id="' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"'), '缺少控件：' + id);
+  });
+
+  manifest.content_scripts.forEach(entry => entry.js.forEach(file => {
+    assert.equal(fs.existsSync(path.join(extensionRoot, file)), true, 'Manifest 缺少脚本：' + file);
+  }));
+  const chatScripts = manifest.content_scripts[1].js;
+  assert.ok(chatScripts.indexOf('src/message-bundle.js') < chatScripts.indexOf('src/content-chat.js'));
 });
 
 test('进度看板只管理插件岗位并持久化手动状态', () => {

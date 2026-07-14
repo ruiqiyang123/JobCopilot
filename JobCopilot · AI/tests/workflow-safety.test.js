@@ -9,7 +9,9 @@ const JOB = {
   company: '示例科技',
   experience: 'one_to_three',
   companySize: 'hundred_to_499',
-  filterStatus: 'pass'
+  filterStatus: 'pass',
+  match: true,
+  reviewStatus: 'approved'
 };
 
 test('岗位 ID、名称和公司一致时身份校验通过', () => {
@@ -51,14 +53,10 @@ test('人工确认只覆盖仍然缺失的信息', () => {
   assert.equal(result.job.manualOverride, true);
 });
 
-test('正式投递只接受 ready 预演且未投过的岗位', () => {
-  const previews = {
-    'job-1': { status: 'ready', greeting: '熟悉 AI 产品设计，做过智能助手项目。' },
-    'job-2': { status: 'failed', greeting: '' }
-  };
-  assert.equal(WorkflowSafety.canDeliver('job-1', previews, {}).ok, true);
-  assert.equal(WorkflowSafety.canDeliver('job-2', previews, {}).ok, false);
-  assert.equal(WorkflowSafety.canDeliver('job-3', previews, {}).ok, false);
-  assert.equal(WorkflowSafety.canDeliver('job-1', previews, { 'job-1': 1 }).ok, false);
+test('正式投递只接受已批准、已确认预演且未投过的岗位', () => {
+  const confirmed = { status: 'confirmed', enabledSteps: ['aiOpening', 'fixedMessage', 'resumeImage'] };
+  assert.equal(WorkflowSafety.canDeliver(JOB, confirmed, {}).ok, true);
+  assert.equal(WorkflowSafety.canDeliver(Object.assign({}, JOB, { reviewStatus: 'pending_review' }), confirmed, {}).ok, false);
+  assert.equal(WorkflowSafety.canDeliver(JOB, { status: 'draft', enabledSteps: ['aiOpening'] }, {}).ok, false);
+  assert.equal(WorkflowSafety.canDeliver(JOB, confirmed, { 'job-1': 1 }).ok, false);
 });
-

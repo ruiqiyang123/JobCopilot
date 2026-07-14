@@ -2,15 +2,17 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <title>BOSS自动投递</title>
+  <title>JobCopilot</title>
   <link rel="stylesheet" href="sidepanel.css">
 </head>
 <body>
-  <div class="header"><h1>BOSS 自动投递</h1></div>
+  <header class="header">
+    <div><h1>JobCopilot</h1><p>先筛选和审核，再自动投递</p></div>
+    <span class="safe-badge">人工批准制</span>
+  </header>
 
-  <!-- 配置 -->
   <section class="card">
-    <div class="card-h" data-toggle="cfgBody"><span>① 配置</span><span class="chev">▾</span></div>
+    <button class="card-h" type="button" data-toggle="cfgBody"><span>① 基础配置</span><span>▾</span></button>
     <div class="card-b" id="cfgBody">
       <label>AI 服务商</label>
       <select id="llmProvider">
@@ -19,99 +21,122 @@
         <option value="longcat">LongCat</option>
         <option value="custom">自定义 OpenAI 兼容接口</option>
       </select>
-
       <label>API Key</label>
       <input type="password" id="llmApiKey" placeholder="在服务商控制台创建" autocomplete="off">
-
       <label>API 地址</label>
       <input type="text" id="llmBaseUrl" placeholder="https://api.example.com/v1">
-
       <label>模型名称</label>
-      <input type="text" id="llmModel" placeholder="如：mimo-v2.5">
-
-      <div id="llmAuthRow" style="display:none">
+      <input type="text" id="llmModel" placeholder="如：LongCat-2.0">
+      <div id="llmAuthRow" class="hidden">
         <label>鉴权方式</label>
         <select id="llmAuthType">
           <option value="bearer">Authorization: Bearer</option>
           <option value="api-key">api-key 请求头</option>
         </select>
       </div>
-
-      <div class="llm-actions">
+      <div class="inline-actions">
         <button type="button" class="btn-secondary" id="testLlm">测试连接</button>
         <span id="llmTestStatus" class="test-status" aria-live="polite"></span>
       </div>
 
-      <label>简历图片（投递时发给HR）</label>
-      <input type="file" id="resumeImg" accept="image/*">
-      <div id="imgPrev"></div>
-
-      <label>简历文字（必填，用于AI筛选 + 生成招呼语）</label>
-      <textarea id="resumeText" rows="5" placeholder="粘贴你的简历：技能、项目经历、教育背景、实习经历等，越详细招呼语越精准"></textarea>
-
-      <label>岗位关键词</label>
-      <input type="text" id="keyword" placeholder="如：数据分析 / AI应用">
-
-      <label>城市</label>
-      <input type="text" id="city" placeholder="如：沈阳 / 北京">
-
+      <label>简历文字（用于筛选和生成开场）</label>
+      <textarea id="resumeText" rows="6" placeholder="粘贴技能、项目、工作经历和教育背景"></textarea>
+      <div class="grid-two">
+        <div><label>岗位关键词</label><input type="text" id="keyword" placeholder="AI 产品经理"></div>
+        <div><label>城市</label><input type="text" id="city" placeholder="北京"></div>
+      </div>
       <label>收集岗位数量</label>
-      <input type="number" id="count" value="20" min="1" max="200">
+      <input type="number" id="count" value="10" min="1" max="200">
 
       <div class="filter-group">
-        <label class="filter-toggle"><input type="checkbox" id="experienceFilterEnabled" checked> 启用工作经验筛选</label>
+        <label class="toggle-label"><input type="checkbox" id="experienceFilterEnabled" checked> 启用工作经验筛选</label>
         <div class="filter-options" id="experienceFilterOptions"></div>
       </div>
-
       <div class="filter-group">
-        <label class="filter-toggle"><input type="checkbox" id="companySizeFilterEnabled" checked> 启用公司规模筛选</label>
+        <label class="toggle-label"><input type="checkbox" id="companySizeFilterEnabled" checked> 启用公司规模筛选</label>
         <div class="filter-options" id="companySizeFilterOptions"></div>
       </div>
-
-      <button class="btn-primary" id="saveCfg">保存配置</button>
-      <span id="saved" class="ok-msg" style="display:none">✓ 已保存</span>
+      <button class="btn-primary" id="saveCfg">保存基础配置</button>
+      <span id="saved" class="ok-msg hidden">✓ 已保存</span>
     </div>
   </section>
 
-  <!-- 运行 -->
   <section class="card">
-    <div class="card-h"><span>② 运行</span></div>
-    <div class="card-b">
-      <label>运行模式</label>
-      <select id="runMode">
-        <option value="preview" selected>模拟运行（不沟通、不发送）</option>
-        <option value="live">正式投递（仅限预演成功岗位）</option>
-      </select>
-      <div class="run-mode-hint" id="runModeHint">默认安全模式：读取完整 JD、二次校验并生成招呼语，不会建立沟通。</div>
-      <button class="btn-go" id="btnCollect">开始收集 + AI筛选</button>
-      <div class="status-row">
-        <span id="phaseText">未开始</span>
-        <span id="progText"></span>
+    <button class="card-h" type="button" data-toggle="planBody"><span>② 招呼方案</span><span>▾</span></button>
+    <div class="card-b" id="planBody">
+      <label>本批使用方案</label>
+      <div class="plan-picker">
+        <select id="greetingPlanSelect"></select>
+        <button class="icon-btn" id="newPlan" type="button">新建</button>
+        <button class="icon-btn danger" id="deletePlan" type="button">删除</button>
       </div>
+      <label>方案名称</label>
+      <input type="text" id="planName" placeholder="AI 产品经理｜网站 + Agent + 简历">
+
+      <label class="toggle-label"><input type="checkbox" id="aiOpeningEnabled" checked> 发送 AI 个性化开场</label>
+      <textarea id="aiInstruction" rows="4" placeholder="描述开场的重点、长度和风格"></textarea>
+
+      <label class="toggle-label"><input type="checkbox" id="fixedMessageEnabled" checked> 发送固定补充消息</label>
+      <textarea id="fixedMessage" rows="4" placeholder="填写个人网站、个人 Agent 等固定内容"></textarea>
+
+      <label class="toggle-label"><input type="checkbox" id="resumeImageEnabled" checked> 最后发送简历图片</label>
+      <input type="file" id="planResumeImage" accept="image/*">
+      <div id="planImgPrev" class="image-preview"></div>
+
+      <div class="send-order">
+        <strong>固定发送顺序</strong>
+        <span>AI 开场</span><i>→</i><span>固定消息</span><i>→</i><span>简历图片</span>
+      </div>
+      <button class="btn-primary" id="savePlan">保存招呼方案</button>
+      <span id="planSaved" class="ok-msg hidden">✓ 已保存</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-title"><span>③ 收集与 AI 筛选</span></div>
+    <div class="card-b">
+      <div class="safety-note">会读取完整 JD 并筛选，不会点击“立即沟通”。</div>
+      <button class="btn-go" id="btnCollect">开始收集 + AI 筛选</button>
+      <div class="status-row"><span id="phaseText">未开始</span><span id="progText"></span></div>
       <div class="ctrl">
         <button id="btnPause" disabled>暂停</button>
         <button id="btnStop" disabled>停止</button>
-        <button id="btnReset">重置</button>
+        <button id="btnReset">重置批次</button>
       </div>
     </div>
   </section>
 
-  <!-- 审核 -->
-  <section class="card" id="reviewCard" style="display:none">
-    <div class="card-h"><span>③ 审核确认</span><span id="reviewCount"></span></div>
+  <section class="card" id="reviewCard">
+    <div class="card-title"><span>④ 岗位审核</span><span id="reviewCount">0 个岗位</span></div>
+    <div class="review-tabs" id="reviewTabs">
+      <button data-review-tab="pending_review" class="active">推荐 <span>0</span></button>
+      <button data-review-tab="needs_info">待补充 <span>0</span></button>
+      <button data-review-tab="approved">已批准 <span>0</span></button>
+      <button data-review-tab="rejected">不投递 <span>0</span></button>
+      <button data-review-tab="filtered_out">已排除 <span>0</span></button>
+    </div>
+    <div class="card-b review-body">
+      <div id="reviewList"><div class="empty">还没有筛选结果</div></div>
+      <div class="sticky-action">
+        <span id="approvedSummary">已批准 0 个</span>
+        <button class="btn-go compact" id="btnPreview" disabled>预演已批准岗位</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="previewCard">
+    <div class="card-title"><span>⑤ 投递预演</span><span id="previewSummary">0 个已确认</span></div>
     <div class="card-b">
-      <div class="review-tools">
-        <label class="mini"><input type="checkbox" id="selAll" checked> 全选匹配</label>
-        <button class="btn-go" id="btnDeliver">预演选中岗位</button>
-      </div>
-      <div id="reviewList"></div>
+      <div class="safety-note">预演只生成最终内容；确认后才可进入正式投递。</div>
+      <div id="previewList"><div class="empty">批准岗位后点击“预演已批准岗位”</div></div>
+      <button class="btn-live" id="btnDeliver" disabled>暂无可正式投递岗位</button>
+      <div id="deliverDisabledReason" class="disabled-reason">需要先批准岗位并确认预演</div>
     </div>
   </section>
 
-  <!-- 进度管理 -->
   <section class="card" id="trackerCard">
-    <div class="card-h"><span>④ 岗位进度</span><span id="trackerSummary">0 个岗位</span></div>
-    <div class="card-b">
+    <button class="card-h" type="button" data-toggle="trackerBody"><span>⑥ 岗位进度</span><span id="trackerSummary">0 个岗位</span></button>
+    <div class="card-b" id="trackerBody">
       <label>状态筛选</label>
       <select id="trackerFilter">
         <option value="all">全部状态</option>
@@ -126,14 +151,16 @@
     </div>
   </section>
 
-  <!-- 日志 -->
-  <section class="card">
-    <div class="card-h"><span>日志</span><button class="mini-btn" id="clearLog">清空</button></div>
+  <details class="card log-card" id="logDetails">
+    <summary><span>运行日志</span><button type="button" class="mini-btn" id="clearLog">清空</button></summary>
     <div class="log" id="log"></div>
-  </section>
+  </details>
 
   <script src="llm-client.js"></script>
   <script src="job-filters.js"></script>
+  <script src="job-detail.js"></script>
+  <script src="greeting-plans.js"></script>
+  <script src="review-workflow.js"></script>
   <script src="job-tracker.js"></script>
   <script src="sidepanel.js"></script>
 </body>

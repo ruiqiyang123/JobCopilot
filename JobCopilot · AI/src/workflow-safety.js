@@ -53,12 +53,16 @@
     return { ok: reasons.length === 0, reasons: reasons, job: merged };
   }
 
-  function canDeliver(jobId, previews, processed) {
-    if (processed && processed[jobId]) return { ok: false, reason: '该岗位已经成功投递' };
-    const preview = previews && previews[jobId];
-    if (!preview) return { ok: false, reason: '该岗位尚未完成模拟运行' };
-    if (preview.status !== 'ready') return { ok: false, reason: '该岗位模拟运行未通过' };
-    if (!String(preview.greeting || '').trim()) return { ok: false, reason: '模拟运行缺少招呼语' };
+  function canDeliver(job, preview, processed) {
+    const source = job || {};
+    if (!source.id) return { ok: false, reason: '找不到岗位数据' };
+    if (source.reviewStatus !== 'approved') return { ok: false, reason: '该岗位尚未人工批准' };
+    if (processed && processed[source.id]) return { ok: false, reason: '该岗位已经成功投递' };
+    if (!preview) return { ok: false, reason: '该岗位尚未完成预演' };
+    if (preview.status !== 'confirmed') return { ok: false, reason: '该岗位预演尚未确认或已经过期' };
+    if (!Array.isArray(preview.enabledSteps) || !preview.enabledSteps.length) {
+      return { ok: false, reason: '预演没有可发送内容' };
+    }
     return { ok: true, reason: '' };
   }
 

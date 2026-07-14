@@ -1,36 +1,58 @@
-// ===== 侧边栏交互 =====
-const $ = (id) => document.getElementById(id);
+// ===== JobCopilot 侧边栏：配置 → 审核 → 预演确认 → 正式投递 =====
+const $ = id => document.getElementById(id);
 const BASIC_CFG_FIELDS = ['resumeText', 'keyword', 'city', 'count'];
 const LLM_STORAGE_FIELDS = ['llmProvider', 'llmApiKey', 'llmBaseUrl', 'llmModel', 'llmAuthType'];
-const LOAD_FIELDS = BASIC_CFG_FIELDS.concat(LLM_STORAGE_FIELDS, ['resumeImage', 'dsKey', 'jobFilterConfig']);
+const LOAD_FIELDS = BASIC_CFG_FIELDS.concat(LLM_STORAGE_FIELDS, [
+  'resumeImage', 'dsKey', 'jobFilterConfig', 'greetingPlansState'
+]);
+
 let currentScreened = [];
 let currentPreviews = {};
 let currentLastBatch = null;
+let greetingPlansState = GreetingPlans.normalizeState();
 let trackerRecords = [];
+let currentReviewTab = 'pending_review';
+let editingResumeImage = '';
 
-// 折叠
-document.querySelectorAll('.card-h[data-toggle]').forEach(h => {
-  h.addEventListener('click', () => {
-    const body = $(h.dataset.toggle);
-    body.style.display = body.style.display === 'none' ? 'block' : 'none';
+function esc(value) {
+  return String(value || '').replace(/[&<>"]/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'
+  }[character]));
+}
+
+function safeJobLink(value) {
+  return JobDetail.canonicalizeDetailUrl(value || '');
+}
+
+function runtimeMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, response => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(response || { ok: false, error: '扩展后台无响应' });
+    });
+  });
+}
+
+document.querySelectorAll('.card-h[data-toggle]').forEach(header => {
+  header.addEventListener('click', () => {
+    const body = $(header.dataset.toggle);
+    body.classList.toggle('hidden');
   });
 });
 
+// ── 模型与基础配置 ──
 function applyProviderUI(forceDefaults) {
   const provider = $('llmProvider').value;
   const preset = LLMClient.getProviderPreset(provider);
   const custom = provider === 'custom';
   $('llmBaseUrl').readOnly = !custom;
-  $('llmAuthRow').style.display = custom ? 'block' : 'none';
-
+  $('llmAuthRow').classList.toggle('hidden', !custom);
   if (preset) {
     $('llmBaseUrl').value = preset.baseUrl;
     $('llmAuthType').value = preset.authType;
     if (forceDefaults || !$('llmModel').value.trim()) $('llmModel').value = preset.model;
     const placeholders = {
-      xiaomi: 'sk- 开头的 MiMo API Key',
-      deepseek: 'DeepSeek API Key',
-      longcat: 'LongCat API Key'
+      xiaomi: 'MiMo API Key', deepseek: 'DeepSeek API Key', longcat: 'LongCat API Key'
     };
     $('llmApiKey').placeholder = placeholders[provider] || '服务商 API Key';
   } else if (forceDefaults) {
@@ -92,34 +114,6 @@ function readJobFilterForm() {
 renderFilterOptions('experienceFilterOptions', 'experience', JobFilters.EXPERIENCE_OPTIONS);
 renderFilterOptions('companySizeFilterOptions', 'companySize', JobFilters.COMPANY_SIZE_OPTIONS);
 
-async function loadConfig() {
-  const stored = await chrome.storage.local.get(LOAD_FIELDS);
-  const migrated = LLMClient.migrateStoredConfig(stored);
-  if (Object.keys(migrated).length) await chrome.storage.local.set(migrated);
-  const data = Object.assign({}, stored, migrated);
-
-  BASIC_CFG_FIELDS.forEach(field => {
-    if (data[field] !== undefined && $(field)) $(field).value = data[field];
-  });
-  $('llmProvider').value = data.llmProvider || 'xiaomi';
-  $('llmApiKey').value = data.llmApiKey || '';
-  $('llmBaseUrl').value = data.llmBaseUrl || '';
-  $('llmModel').value = data.llmModel || '';
-  $('llmAuthType').value = data.llmAuthType || 'bearer';
-  applyProviderUI(false);
-  applyJobFilterConfig(data.jobFilterConfig);
-  if (data.resumeImage) showImg(data.resumeImage);
-}
-
-function showImg(dataUrl) { $('imgPrev').innerHTML = '<img src="' + dataUrl + '">'; }
-
-$('resumeImg').addEventListener('change', (e) => {
-  const file = e.target.files[0]; if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (ev) => { showImg(ev.target.result); chrome.storage.local.set({ resumeImage: ev.target.result }); };
-  reader.readAsDataURL(file);
-});
-
 function readLLMForm() {
   return {
     provider: $('llmProvider').value,
@@ -169,70 +163,446 @@ function llmStorageFrom(config) {
 }
 
 async function persistCurrentConfig() {
-  const config = readLLMForm();
-  const normalized = LLMClient.validateConfig(config);
+  const normalized = LLMClient.validateConfig(readLLMForm());
   const granted = await ensureCustomHostPermission(normalized);
   if (!granted) throw new Error('未授权访问该模型接口域名');
-
   const data = llmStorageFrom(normalized);
   data.jobFilterConfig = readJobFilterForm();
-  BASIC_CFG_FIELDS.forEach(field => {
-    data[field] = $(field).value.trim ? $(field).value.trim() : $(field).value;
-  });
+  BASIC_CFG_FIELDS.forEach(field => { data[field] = $(field).value.trim(); });
   await chrome.storage.local.set(data);
+  const invalidated = await runtimeMessage({
+    type: 'INVALIDATE_PREVIEWS', reason: '基础配置已变化，需要重新预演'
+  });
+  if (invalidated.ok && invalidated.result) currentPreviews = invalidated.result.previews || currentPreviews;
   return normalized;
 }
 
-function showSaved() {
-  const saved = $('saved');
-  saved.style.display = 'inline';
-  setTimeout(() => { saved.style.display = 'none'; }, 1500);
+function showSaved(id) {
+  const element = $(id);
+  element.classList.remove('hidden');
+  setTimeout(() => element.classList.add('hidden'), 1500);
 }
 
-function setLLMTestStatus(text, state) {
-  const status = $('llmTestStatus');
-  status.textContent = text || '';
-  status.className = 'test-status' + (state ? ' ' + state : '');
+function setLLMTestStatus(text, status) {
+  $('llmTestStatus').textContent = text || '';
+  $('llmTestStatus').className = 'test-status' + (status ? ' ' + status : '');
 }
 
-function runtimeMessage(message) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, response => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(response || { ok: false, error: '扩展后台无响应' });
-    });
+async function loadConfig() {
+  const stored = await chrome.storage.local.get(LOAD_FIELDS);
+  const migrated = LLMClient.migrateStoredConfig(stored);
+  if (Object.keys(migrated).length) await chrome.storage.local.set(migrated);
+  const data = Object.assign({}, stored, migrated);
+  BASIC_CFG_FIELDS.forEach(field => {
+    if (data[field] !== undefined) $(field).value = data[field];
+  });
+  $('llmProvider').value = data.llmProvider || 'xiaomi';
+  $('llmApiKey').value = data.llmApiKey || '';
+  $('llmBaseUrl').value = data.llmBaseUrl || '';
+  $('llmModel').value = data.llmModel || '';
+  $('llmAuthType').value = data.llmAuthType || 'bearer';
+  applyProviderUI(false);
+  applyJobFilterConfig(data.jobFilterConfig);
+  greetingPlansState = GreetingPlans.normalizeState(data.greetingPlansState, {
+    resumeImage: data.resumeImage || ''
+  });
+  renderPlanPicker();
+}
+
+$('llmProvider').addEventListener('change', () => {
+  $('llmApiKey').value = '';
+  applyProviderUI(true);
+  setLLMTestStatus('', '');
+});
+$('experienceFilterEnabled').addEventListener('change', () => syncFilterEnabled('experience'));
+$('companySizeFilterEnabled').addEventListener('change', () => syncFilterEnabled('companySize'));
+$('saveCfg').addEventListener('click', async () => {
+  try { await persistCurrentConfig(); showSaved('saved'); }
+  catch (error) { addLog(error.message, 'error'); }
+});
+$('testLlm').addEventListener('click', async () => {
+  $('testLlm').disabled = true;
+  setLLMTestStatus('连接中…', '');
+  try {
+    const config = LLMClient.validateConfig(readLLMForm());
+    if (!(await ensureCustomHostPermission(config))) throw new Error('未授权访问该模型接口域名');
+    const response = await runtimeMessage({ type: 'TEST_LLM', config: config });
+    if (!response.ok) throw new Error(response.error || '连接失败');
+    const result = response.result;
+    setLLMTestStatus('✓ ' + result.provider + ' / ' + result.model + ' · ' + result.elapsedMs + 'ms', 'success');
+  } catch (error) { setLLMTestStatus('✗ ' + error.message, 'error'); }
+  finally { $('testLlm').disabled = false; }
+});
+
+// ── 招呼方案 ──
+function selectedPlan() { return GreetingPlans.selectedPlan(greetingPlansState); }
+
+function renderPlanPicker() {
+  greetingPlansState = GreetingPlans.normalizeState(greetingPlansState);
+  $('greetingPlanSelect').innerHTML = greetingPlansState.plans.map(plan =>
+    '<option value="' + esc(plan.id) + '"' + (plan.id === greetingPlansState.selectedPlanId ? ' selected' : '')
+      + '>' + esc(plan.name) + '</option>'
+  ).join('');
+  applyPlanForm(selectedPlan());
+}
+
+function applyPlanForm(plan) {
+  const normalized = GreetingPlans.normalizePlan(plan);
+  $('planName').value = normalized.name;
+  $('aiOpeningEnabled').checked = normalized.aiOpeningEnabled;
+  $('aiInstruction').value = normalized.aiInstruction;
+  $('fixedMessageEnabled').checked = normalized.fixedMessageEnabled;
+  $('fixedMessage').value = normalized.fixedMessage;
+  $('resumeImageEnabled').checked = normalized.resumeImageEnabled;
+  editingResumeImage = normalized.resumeImage;
+  renderPlanImage();
+  syncPlanFields();
+}
+
+function syncPlanFields() {
+  $('aiInstruction').disabled = !$('aiOpeningEnabled').checked;
+  $('fixedMessage').disabled = !$('fixedMessageEnabled').checked;
+  $('planResumeImage').disabled = !$('resumeImageEnabled').checked;
+}
+
+function renderPlanImage() {
+  $('planImgPrev').innerHTML = editingResumeImage
+    ? '<img src="' + editingResumeImage + '" alt="当前简历图片">'
+    : '<div class="job-meta">尚未上传简历图片</div>';
+}
+
+function readPlanForm() {
+  const current = selectedPlan();
+  return GreetingPlans.normalizePlan({
+    id: current.id,
+    name: $('planName').value.trim(),
+    aiOpeningEnabled: $('aiOpeningEnabled').checked,
+    aiInstruction: $('aiInstruction').value.trim(),
+    fixedMessageEnabled: $('fixedMessageEnabled').checked,
+    fixedMessage: $('fixedMessage').value.trim(),
+    resumeImageEnabled: $('resumeImageEnabled').checked,
+    resumeImage: editingResumeImage,
+    createdAt: current.createdAt,
+    updatedAt: Date.now()
   });
 }
 
-async function restoreState() {
-  const response = await runtimeMessage({ type: 'GET_STATE' });
-  if (!response.ok) throw new Error(response.error || '状态读取失败');
-  const result = response.result || {};
-  currentScreened = result.screened || [];
-  currentPreviews = result.previews || {};
-  currentLastBatch = result.lastBatch || null;
-  if (currentScreened.length) renderReview(currentScreened);
+async function persistGreetingPlans() {
+  const response = await runtimeMessage({ type: 'SAVE_GREETING_PLANS', state: greetingPlansState });
+  if (!response.ok) throw new Error(response.error || '招呼方案保存失败');
+  greetingPlansState = response.result.state || response.result;
+  currentPreviews = response.result.previews || currentPreviews;
+  await chrome.storage.local.set({ greetingPlansState: greetingPlansState });
+  renderPlanPicker();
+  renderPreviews();
 }
 
-async function refreshTracker() {
-  const response = await runtimeMessage({ type: 'GET_TRACKER' });
-  if (!response.ok) throw new Error(response.error || '进度读取失败');
-  trackerRecords = response.result.records || [];
-  renderTracker();
-}
-
-function safeJobLink(link) {
+$('greetingPlanSelect').addEventListener('change', async event => {
   try {
-    const url = new URL(link);
-    if (url.protocol !== 'https:' || !/(^|\.)zhipin\.com$/.test(url.hostname)) return '';
-    return url.toString();
-  } catch (error) { return ''; }
+    greetingPlansState = GreetingPlans.selectPlan(greetingPlansState, event.target.value);
+    await persistGreetingPlans();
+  } catch (error) { addLog(error.message, 'error'); }
+});
+$('aiOpeningEnabled').addEventListener('change', syncPlanFields);
+$('fixedMessageEnabled').addEventListener('change', syncPlanFields);
+$('resumeImageEnabled').addEventListener('change', syncPlanFields);
+$('planResumeImage').addEventListener('change', event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = result => { editingResumeImage = result.target.result; renderPlanImage(); };
+  reader.readAsDataURL(file);
+});
+$('savePlan').addEventListener('click', async () => {
+  try {
+    greetingPlansState = GreetingPlans.upsertPlan(greetingPlansState, readPlanForm());
+    await persistGreetingPlans();
+    showSaved('planSaved');
+  } catch (error) { addLog(error.message, 'error'); }
+});
+$('newPlan').addEventListener('click', async () => {
+  try {
+    const plan = GreetingPlans.normalizePlan({ name: '新招呼方案' });
+    greetingPlansState = GreetingPlans.upsertPlan(greetingPlansState, plan);
+    greetingPlansState = GreetingPlans.selectPlan(greetingPlansState, plan.id);
+    await persistGreetingPlans();
+  } catch (error) { addLog(error.message, 'error'); }
+});
+$('deletePlan').addEventListener('click', async () => {
+  const plan = selectedPlan();
+  if (!window.confirm('删除招呼方案“' + plan.name + '”？相关预演将需要重新生成。')) return;
+  try {
+    greetingPlansState = GreetingPlans.removePlan(greetingPlansState, plan.id);
+    await persistGreetingPlans();
+  } catch (error) { addLog(error.message, 'error'); }
+});
+
+// ── 运行控制 ──
+function setRunning(running) {
+  $('btnCollect').disabled = running;
+  $('btnPause').disabled = !running;
+  $('btnStop').disabled = !running;
+  if (!running) $('btnPause').textContent = '暂停';
 }
 
+$('btnCollect').addEventListener('click', async () => {
+  try { await persistCurrentConfig(); }
+  catch (error) { return addLog(error.message, 'error'); }
+  if (!$('keyword').value.trim()) return addLog('请先填写岗位关键词', 'error');
+  currentScreened = [];
+  currentPreviews = {};
+  currentLastBatch = null;
+  currentReviewTab = 'pending_review';
+  renderReview();
+  renderPreviews();
+  setRunning(true);
+  chrome.runtime.sendMessage({ type: 'START_COLLECT' });
+});
+$('btnPause').addEventListener('click', () => {
+  if ($('btnPause').textContent === '暂停') {
+    $('btnPause').textContent = '继续';
+    chrome.runtime.sendMessage({ type: 'PAUSE' });
+  } else {
+    $('btnPause').textContent = '暂停';
+    chrome.runtime.sendMessage({ type: 'RESUME' });
+  }
+});
+$('btnStop').addEventListener('click', () => {
+  chrome.runtime.sendMessage({ type: 'STOP' });
+  setRunning(false);
+});
+$('btnReset').addEventListener('click', () => {
+  if (!window.confirm('重置当前筛选、审核和预演批次？岗位进度与已投记录会保留。')) return;
+  chrome.runtime.sendMessage({ type: 'RESET' });
+  currentScreened = [];
+  currentPreviews = {};
+  currentLastBatch = null;
+  renderReview();
+  renderPreviews();
+  setRunning(false);
+});
+
+// ── 审核队列 ──
+function normalizedJobs() { return currentScreened.map(ReviewWorkflow.normalizeJob); }
+
+function reviewCounts() {
+  const counts = { pending_review: 0, needs_info: 0, approved: 0, rejected: 0, filtered_out: 0 };
+  normalizedJobs().forEach(job => { counts[job.reviewStatus] = (counts[job.reviewStatus] || 0) + 1; });
+  return counts;
+}
+
+function jobFactsText(job) {
+  return [
+    job.company || '公司未知', job.salary || '薪资未知',
+    '经验：' + JobFilters.labelFor('experience', job.experience),
+    '规模：' + JobFilters.labelFor('companySize', job.companySize)
+  ].join(' · ');
+}
+
+function reasonClass(job) {
+  if (job.reviewStatus === 'needs_info') return 'pending';
+  if (job.reviewStatus === 'filtered_out' || job.reviewStatus === 'rejected') return 'skip';
+  return 'match';
+}
+
+function renderReviewCard(job) {
+  const link = safeJobLink(job.detailUrl || job.link);
+  const title = link
+    ? '<a href="' + esc(link) + '" target="_blank" rel="noreferrer">' + esc(job.name) + '</a>'
+    : esc(job.name);
+  let actions = '';
+  if (link) actions += '<a class="icon-btn" href="' + esc(link) + '" target="_blank" rel="noreferrer">查看完整岗位</a>';
+  if (job.reviewStatus === 'needs_info') {
+    actions += '<button data-action="confirm-filter" data-id="' + esc(job.id) + '">确认信息符合</button>';
+    actions += '<button class="reject" data-action="reject" data-id="' + esc(job.id) + '">不投递</button>';
+  } else if (job.reviewStatus === 'pending_review' || job.reviewStatus === 'rejected') {
+    if (job.filterStatus === 'pass' && job.match === true) {
+      actions += '<button class="approve" data-action="approve" data-id="' + esc(job.id) + '">批准投递</button>';
+    }
+    if (job.reviewStatus !== 'rejected') {
+      actions += '<button class="reject" data-action="reject" data-id="' + esc(job.id) + '">不投递</button>';
+    }
+  } else if (job.reviewStatus === 'approved') {
+    actions += '<button class="reject" data-action="reject" data-id="' + esc(job.id) + '">取消批准</button>';
+  }
+  const reason = job.reason || (job.filterReasons || []).join('；') || '等待审核';
+  const jd = String(job.jd || '').trim();
+  const detailError = job.detailError ? '<div class="job-reason pending">详情读取：' + esc(job.detailError) + '</div>' : '';
+  return '<article class="job-item"><div class="job-head"><div class="job-title">' + title + '</div>'
+    + '<span class="preview-status">' + esc(reviewStatusLabel(job.reviewStatus)) + '</span></div>'
+    + '<div class="job-meta">' + esc(jobFactsText(job)) + '</div>'
+    + '<div class="job-reason ' + reasonClass(job) + '">' + esc(reason) + '</div>'
+    + detailError
+    + (jd ? '<div class="jd-summary">' + esc(jd) + '</div>' : '')
+    + '<div class="job-actions">' + actions + '</div></article>';
+}
+
+function reviewStatusLabel(status) {
+  return ({
+    pending_review: '待审核', needs_info: '待补充', approved: '已批准',
+    rejected: '不投递', filtered_out: '已排除'
+  })[status] || status;
+}
+
+function renderReview() {
+  const counts = reviewCounts();
+  document.querySelectorAll('[data-review-tab]').forEach(button => {
+    const status = button.dataset.reviewTab;
+    button.classList.toggle('active', status === currentReviewTab);
+    const count = button.querySelector('span');
+    if (count) count.textContent = counts[status] || 0;
+  });
+  $('reviewCount').textContent = normalizedJobs().length + ' 个岗位';
+  const visible = normalizedJobs().filter(job => job.reviewStatus === currentReviewTab);
+  $('reviewList').innerHTML = visible.map(renderReviewCard).join('')
+    || '<div class="empty">当前分类没有岗位</div>';
+  $('approvedSummary').textContent = '已批准 ' + counts.approved + ' 个';
+  $('btnPreview').disabled = counts.approved === 0;
+  renderPreviews();
+}
+
+$('reviewTabs').addEventListener('click', event => {
+  const button = event.target.closest('[data-review-tab]');
+  if (!button) return;
+  currentReviewTab = button.dataset.reviewTab;
+  renderReview();
+});
+
+$('reviewList').addEventListener('click', async event => {
+  const button = event.target.closest('[data-action]');
+  if (!button) return;
+  button.disabled = true;
+  const jobId = button.dataset.id;
+  try {
+    let response;
+    if (button.dataset.action === 'confirm-filter') {
+      response = await runtimeMessage({ type: 'CONFIRM_FILTER_PENDING', jobId: jobId });
+    } else {
+      response = await runtimeMessage({
+        type: 'SET_REVIEW_DECISION', jobId: jobId,
+        decision: button.dataset.action === 'approve' ? 'approved' : 'rejected'
+      });
+    }
+    if (!response.ok) throw new Error(response.error || '审核操作失败');
+    currentScreened = response.result.screened || currentScreened;
+    currentPreviews = response.result.previews || currentPreviews;
+    renderReview();
+  } catch (error) {
+    addLog(error.message, 'error');
+    button.disabled = false;
+  }
+});
+
+// ── 预演与正式投递 ──
+$('btnPreview').addEventListener('click', async () => {
+  try { GreetingPlans.validateForSend(selectedPlan()); }
+  catch (error) { return addLog(error.message, 'error'); }
+  const ids = normalizedJobs().filter(job => job.reviewStatus === 'approved').map(job => job.id);
+  if (!ids.length) return addLog('请先批准至少一个岗位', 'error');
+  setRunning(true);
+  addLog('开始预演 ' + ids.length + ' 个已批准岗位', 'info');
+  chrome.runtime.sendMessage({ type: 'START_PREVIEW', jobIds: ids });
+});
+
+function renderPreviewItem(job, preview) {
+  if (!preview) {
+    return '<article class="preview-item"><div class="job-title">' + esc(job.name) + '</div>'
+      + '<div class="preview-status">等待预演</div></article>';
+  }
+  if (preview.status === 'failed' || preview.status === 'expired') {
+    return '<article class="preview-item"><div class="job-title">' + esc(job.name) + '</div>'
+      + '<div class="preview-status failed">' + esc(preview.error || '预演失败') + '</div></article>';
+  }
+  const aiEnabled = (preview.enabledSteps || []).indexOf('aiOpening') >= 0;
+  const fixedEnabled = (preview.enabledSteps || []).indexOf('fixedMessage') >= 0;
+  const imageEnabled = (preview.enabledSteps || []).indexOf('resumeImage') >= 0;
+  return '<article class="preview-item"><div class="job-head"><div class="job-title">' + esc(job.name) + '</div>'
+    + '<span class="preview-status ' + (preview.status === 'confirmed' ? 'confirmed' : '') + '" data-preview-status="'
+    + esc(job.id) + '">' + (preview.status === 'confirmed' ? '✓ 已确认' : '待确认') + '</span></div>'
+    + (aiEnabled ? '<label>AI 个性化开场</label><textarea rows="6" data-preview-opening="' + esc(job.id) + '">'
+      + esc(preview.aiOpening) + '</textarea>' : '')
+    + (fixedEnabled ? '<div class="preview-part"><strong>固定补充消息</strong>' + esc(preview.fixedMessage) + '</div>' : '')
+    + (imageEnabled ? '<div class="preview-part"><strong>简历图片</strong>已绑定当前招呼方案图片</div>' : '')
+    + '<div class="preview-actions"><button class="confirm" data-confirm-preview="' + esc(job.id) + '">确认此岗位预演</button></div>'
+    + '</article>';
+}
+
+function confirmedApprovedJobs() {
+  return normalizedJobs().filter(job => job.reviewStatus === 'approved'
+    && currentPreviews[job.id] && currentPreviews[job.id].status === 'confirmed');
+}
+
+function renderPreviews() {
+  if (!$('previewList')) return;
+  const approved = normalizedJobs().filter(job => job.reviewStatus === 'approved');
+  $('previewList').innerHTML = approved.length
+    ? approved.map(job => renderPreviewItem(job, currentPreviews[job.id])).join('')
+    : '<div class="empty">批准岗位后点击“预演已批准岗位”</div>';
+  const ready = confirmedApprovedJobs();
+  $('previewSummary').textContent = ready.length + ' 个已确认';
+  $('btnDeliver').disabled = ready.length === 0;
+  $('btnDeliver').textContent = ready.length ? '正式投递 ' + ready.length + ' 个已批准岗位' : '暂无可正式投递岗位';
+  $('deliverDisabledReason').textContent = ready.length
+    ? '将严格按预演内容发送，任一步失败立即停止'
+    : '需要先批准岗位并确认预演';
+  $('deliverDisabledReason').classList.toggle('disabled-reason', ready.length === 0);
+}
+
+$('previewList').addEventListener('input', event => {
+  const textarea = event.target.closest('[data-preview-opening]');
+  if (!textarea) return;
+  const jobId = textarea.dataset.previewOpening;
+  if (currentPreviews[jobId]) {
+    currentPreviews[jobId] = Object.assign({}, currentPreviews[jobId], {
+      status: 'draft', aiOpening: textarea.value
+    });
+    const status = document.querySelector('[data-preview-status="' + CSS.escape(jobId) + '"]');
+    if (status) { status.textContent = '内容已修改，需重新确认'; status.className = 'preview-status failed'; }
+    const ready = confirmedApprovedJobs();
+    $('previewSummary').textContent = ready.length + ' 个已确认';
+    $('btnDeliver').disabled = ready.length === 0;
+  }
+});
+
+$('previewList').addEventListener('click', async event => {
+  const button = event.target.closest('[data-confirm-preview]');
+  if (!button) return;
+  const jobId = button.dataset.confirmPreview;
+  const textarea = document.querySelector('[data-preview-opening="' + CSS.escape(jobId) + '"]');
+  button.disabled = true;
+  try {
+    const response = await runtimeMessage({
+      type: 'CONFIRM_PREVIEW', jobId: jobId,
+      aiOpening: textarea ? textarea.value : (currentPreviews[jobId] && currentPreviews[jobId].aiOpening)
+    });
+    if (!response.ok) throw new Error(response.error || '预演确认失败');
+    currentPreviews = response.result.previews || currentPreviews;
+    renderPreviews();
+  } catch (error) {
+    addLog(error.message, 'error');
+    button.disabled = false;
+  }
+});
+
+$('btnDeliver').addEventListener('click', () => {
+  const jobs = confirmedApprovedJobs();
+  if (!jobs.length) return addLog('没有已批准且已确认预演的岗位', 'error');
+  const names = jobs.map(job => job.name + ' - ' + (job.company || '公司未知'));
+  const confirmed = window.confirm(
+    '即将使用“' + selectedPlan().name + '”正式投递 ' + jobs.length + ' 个岗位：\n\n'
+      + names.join('\n') + '\n\n将依次发送 AI 开场、固定消息和简历图片。任一步失败会停止整批。确认继续？'
+  );
+  if (!confirmed) return;
+  setRunning(true);
+  addLog('开始正式投递 ' + jobs.length + ' 个已批准岗位', 'warn');
+  chrome.runtime.sendMessage({ type: 'START_DELIVER', jobIds: jobs.map(job => job.id) });
+});
+
+// ── 岗位进度 ──
 function trackerStatusOptions(current) {
   return JobTracker.STATUS_OPTIONS.map(option =>
-    '<option value="' + esc(option.value) + '"' + (option.value === current ? ' selected' : '')
-      + '>' + esc(option.label) + '</option>'
+    '<option value="' + esc(option.value) + '"' + (option.value === current ? ' selected' : '') + '>'
+      + esc(option.label) + '</option>'
   ).join('');
 }
 
@@ -249,36 +619,22 @@ function renderTracker() {
     const title = link
       ? '<a class="tracker-link" href="' + esc(link) + '" target="_blank" rel="noreferrer">' + esc(record.name) + '</a>'
       : esc(record.name);
-    const updated = record.updatedAt ? new Date(record.updatedAt).toLocaleString('zh-CN', { hour12: false }) : '';
     return '<div class="tracker-item"><div class="tracker-head"><div class="tracker-title">' + title + '</div>'
       + '<select class="tracker-status" data-tracker-id="' + esc(record.id) + '">'
-      + trackerStatusOptions(record.status) + '</select></div>'
-      + '<div class="tracker-meta">' + esc(record.company || '公司未知') + ' · ' + esc(record.salary || '薪资未知')
-      + (updated ? ' · 更新 ' + esc(updated) : '') + '</div></div>';
-  }).join('') || '<div class="job-sub">暂无插件处理过的岗位</div>';
+      + trackerStatusOptions(record.status) + '</select></div><div class="tracker-meta">'
+      + esc(record.company || '公司未知') + ' · ' + esc(record.salary || '薪资未知') + '</div></div>';
+  }).join('') || '<div class="empty">暂无插件处理过的岗位</div>';
 }
 
-function updateRunModeUI() {
-  const live = $('runMode').value === 'live';
-  $('runModeHint').textContent = live
-    ? '正式模式只允许投递已经预演成功的岗位；点击后还会进行一次批次确认和发送前复检。'
-    : '默认安全模式：读取完整 JD、二次校验并生成招呼语，不会建立沟通。';
-  $('runModeHint').classList.toggle('live', live);
-  $('btnDeliver').textContent = live ? '正式投递选中岗位' : '预演选中岗位';
-  if (currentScreened.length) renderReview(currentScreened);
+async function refreshTracker() {
+  const response = await runtimeMessage({ type: 'GET_TRACKER' });
+  if (!response.ok) throw new Error(response.error || '进度读取失败');
+  trackerRecords = response.result.records || [];
+  renderTracker();
 }
 
-$('llmProvider').addEventListener('change', () => {
-  $('llmApiKey').value = '';
-  applyProviderUI(true);
-  setLLMTestStatus('', '');
-});
-
-$('experienceFilterEnabled').addEventListener('change', () => syncFilterEnabled('experience'));
-$('companySizeFilterEnabled').addEventListener('change', () => syncFilterEnabled('companySize'));
-$('runMode').addEventListener('change', updateRunModeUI);
 $('trackerFilter').addEventListener('change', renderTracker);
-$('trackerList').addEventListener('change', async (event) => {
+$('trackerList').addEventListener('change', async event => {
   const select = event.target.closest('[data-tracker-id]');
   if (!select) return;
   select.disabled = true;
@@ -289,217 +645,86 @@ $('trackerList').addEventListener('change', async (event) => {
     if (!response.ok) throw new Error(response.error || '进度更新失败');
     trackerRecords = response.result.records || [];
     renderTracker();
-    addLog('岗位进度已更新', 'success');
   } catch (error) {
     addLog(error.message, 'error');
     await refreshTracker().catch(() => {});
   }
 });
-updateRunModeUI();
 
-$('saveCfg').addEventListener('click', async () => {
-  try {
-    await persistCurrentConfig();
-    showSaved();
-  } catch (error) {
-    addLog(error.message, 'error');
+// ── 恢复与消息 ──
+async function restoreState() {
+  const response = await runtimeMessage({ type: 'GET_STATE' });
+  if (!response.ok) throw new Error(response.error || '状态读取失败');
+  const result = response.result || {};
+  currentScreened = result.screened || [];
+  currentPreviews = result.previews || {};
+  currentLastBatch = result.lastBatch || null;
+  if (result.greetingPlansState) {
+    greetingPlansState = GreetingPlans.normalizeState(result.greetingPlansState);
+    renderPlanPicker();
   }
-});
-
-$('testLlm').addEventListener('click', async () => {
-  const button = $('testLlm');
-  button.disabled = true;
-  setLLMTestStatus('连接中…', 'testing');
-  try {
-    const config = LLMClient.validateConfig(readLLMForm());
-    const granted = await ensureCustomHostPermission(config);
-    if (!granted) throw new Error('未授权访问该模型接口域名');
-    const response = await runtimeMessage({ type: 'TEST_LLM', config: config });
-    if (!response.ok) throw new Error(response.error || '连接失败');
-    const result = response.result;
-    setLLMTestStatus('✓ ' + result.provider + ' / ' + result.model + ' · ' + result.elapsedMs + 'ms', 'success');
-  } catch (error) {
-    setLLMTestStatus('✗ ' + error.message, 'error');
-  } finally {
-    button.disabled = false;
-  }
-});
-
-// 运行控制
-$('btnCollect').addEventListener('click', async () => {
-  try {
-    await persistCurrentConfig();
-  } catch (error) {
-    return addLog(error.message, 'error');
-  }
-  if (!$('keyword').value.trim()) return addLog('请先填岗位关键词', 'error');
-  $('runMode').value = 'preview';
-  currentScreened = []; currentPreviews = {}; currentLastBatch = null;
-  updateRunModeUI();
-  $('reviewCard').style.display = 'none';
-  setRunning(true);
-  chrome.runtime.sendMessage({ type: 'START_COLLECT' });
-});
-
-loadConfig().then(async () => {
-  await restoreState();
-  await refreshTracker();
-}).catch(error => addLog('配置或状态载入失败：' + error.message, 'error'));
-
-$('btnDeliver').addEventListener('click', async () => {
-  const ids = Array.from(document.querySelectorAll('.job-item input[type=checkbox]:checked:not(:disabled)'))
-    .map(c => c.dataset.id);
-  if (!ids.length) return addLog('请至少勾选一个岗位', 'error');
-  const live = $('runMode').value === 'live';
-  if (live) {
-    const names = ids.map(id => {
-      const job = currentScreened.find(item => item.id === id);
-      return job ? job.name + ' - ' + (job.company || '公司未知') : id;
-    });
-    const confirmed = window.confirm(
-      '即将正式投递 ' + ids.length + ' 个岗位：\n\n' + names.join('\n')
-        + '\n\n发送前会再次校验；任一失败将立即停止。确认继续？'
-    );
-    if (!confirmed) return addLog('已取消正式投递', 'warn');
-  }
-  setRunning(true);
-  addLog((live ? '开始正式投递 ' : '开始完整预演 ') + ids.length + ' 个岗位', 'info');
-  chrome.runtime.sendMessage({ type: live ? 'START_DELIVER' : 'START_PREVIEW', jobIds: ids });
-});
-
-$('btnPause').addEventListener('click', () => {
-  if ($('btnPause').textContent === '暂停') { $('btnPause').textContent = '继续'; chrome.runtime.sendMessage({ type: 'PAUSE' }); }
-  else { $('btnPause').textContent = '暂停'; chrome.runtime.sendMessage({ type: 'RESUME' }); }
-});
-$('btnStop').addEventListener('click', () => { chrome.runtime.sendMessage({ type: 'STOP' }); setRunning(false); });
-$('btnReset').addEventListener('click', () => { chrome.runtime.sendMessage({ type: 'RESET' }); $('reviewCard').style.display = 'none'; setRunning(false); });
-$('clearLog').addEventListener('click', () => { $('log').innerHTML = ''; });
-
-$('selAll').addEventListener('change', (e) => {
-  document.querySelectorAll('.job-item:not(.skip):not(.pending) input[type=checkbox]')
-    .forEach(c => { c.checked = e.target.checked; });
-});
-
-$('reviewList').addEventListener('click', async (event) => {
-  const button = event.target.closest('[data-action="confirm-filter"]');
-  if (!button) return;
-  button.disabled = true;
-  button.textContent = '确认中…';
-  try {
-    const response = await runtimeMessage({ type: 'CONFIRM_FILTER_PENDING', jobId: button.dataset.id });
-    if (!response.ok) throw new Error(response.error || '人工确认失败');
-    renderReview(response.result.screened || []);
-    addLog('已人工确认岗位信息，完成 AI 筛选', 'success');
-  } catch (error) {
-    addLog(error.message, 'error');
-    button.disabled = false;
-    button.textContent = '确认符合并进行 AI 筛选';
-  }
-});
-
-function setRunning(running) {
-  $('btnCollect').disabled = running;
-  $('btnPause').disabled = !running;
-  $('btnStop').disabled = !running;
-  if (!running) $('btnPause').textContent = '暂停';
+  renderReview();
+  renderPreviews();
 }
 
-// 渲染审核列表
-function renderReview(screened) {
-  currentScreened = screened || [];
-  const live = $('runMode').value === 'live';
-  const matched = screened.filter(j => j.filterStatus === 'pass' && j.match);
-  const pending = screened.filter(j => j.filterStatus === 'pending');
-  const skipped = screened.filter(j => j.filterStatus === 'fail' || (j.filterStatus === 'pass' && !j.match));
-  $('reviewCount').textContent = '匹配 ' + matched.length + ' · 待确认 ' + pending.length + ' / ' + screened.length;
-  let html = '';
-  matched.forEach(j => {
-    const preview = currentPreviews[j.id];
-    const ready = preview && preview.status === 'ready';
-    const disabled = live && !ready;
-    html += '<div class="job-item' + (disabled ? ' skip' : '') + '"><input type="checkbox" '
-      + (disabled ? 'disabled ' : 'checked ') + 'data-id="' + esc(j.id) + '">'
-      + '<div class="job-main"><div class="job-title">' + esc(j.name) + '</div>'
-      + '<div class="job-sub">' + esc(jobFactsText(j)) + '</div>'
-      + '<div class="job-reason m">✓ ' + esc((j.filterReasons || []).join('；'))
-      + (j.reason ? '；AI：' + esc(j.reason) : '') + '</div>'
-      + previewHtml(preview, live) + '</div></div>';
-  });
-  pending.forEach(j => {
-    html += '<div class="job-item pending"><div class="job-main"><div class="job-title">' + esc(j.name) + '</div>'
-      + '<div class="job-sub">' + esc(jobFactsText(j)) + '</div>'
-      + '<div class="job-reason p">⚠ ' + esc((j.filterReasons || []).join('；')) + '</div>'
-      + '<button type="button" class="btn-confirm-filter" data-action="confirm-filter" data-id="' + esc(j.id)
-      + '">确认符合并进行 AI 筛选</button></div></div>';
-  });
-  skipped.forEach(j => {
-    html += '<div class="job-item skip"><input type="checkbox" disabled data-id="' + esc(j.id) + '">'
-      + '<div class="job-main"><div class="job-title">' + esc(j.name) + '</div>'
-      + '<div class="job-sub">' + esc(jobFactsText(j)) + '</div>'
-      + '<div class="job-reason s">✗ ' + esc(j.reason) + '</div></div></div>';
-  });
-  $('reviewList').innerHTML = html || '<div class="job-sub">无岗位</div>';
-  $('reviewCard').style.display = 'block';
-}
-function previewHtml(preview, live) {
-  if (preview && preview.status === 'ready') {
-    return '<div class="preview-text"><strong>预演招呼语：</strong>' + esc(preview.greeting) + '</div>';
+chrome.runtime.onMessage.addListener(message => {
+  if (message.type === 'LOG') addLog(message.text, message.level);
+  if (message.type === 'PROGRESS') {
+    $('progText').textContent = (message.label ? message.label + ' ' : '') + message.cur + '/' + message.total;
   }
-  if (preview && preview.status === 'failed') {
-    return '<div class="preview-text failed">预演失败：' + esc(preview.error || '未知错误') + '</div>';
-  }
-  return live ? '<div class="preview-text failed">需先完成模拟运行</div>' : '';
-}
-function jobFactsText(job) {
-  return [
-    job.company || '公司未知',
-    job.salary || '薪资未知',
-    '经验：' + JobFilters.labelFor('experience', job.experience),
-    '规模：' + JobFilters.labelFor('companySize', job.companySize)
-  ].join(' · ');
-}
-function esc(s) { return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-
-// 消息接收
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === 'LOG') addLog(msg.text, msg.level);
-  if (msg.type === 'PROGRESS') $('progText').textContent = (msg.label ? msg.label + ' ' : '') + msg.cur + '/' + msg.total;
-  if (msg.type === 'PHASE') {
-    const map = {
-      idle: '未开始', collecting: '收集中', screening: 'AI筛选中',
-      previewing: '完整预演中', review: '待审核', delivering: '正式投递中', done: '已完成'
+  if (message.type === 'PHASE') {
+    const labels = {
+      idle: '未开始', collecting: '收集中', screening: '读取详情与 AI 筛选中',
+      previewing: '生成预演中', review: '待人工审核', delivering: '正式投递中', done: '已完成'
     };
-    $('phaseText').textContent = map[msg.phase] || msg.phase;
-    if (msg.phase === 'review' || msg.phase === 'done' || msg.phase === 'idle') setRunning(false);
+    $('phaseText').textContent = labels[message.phase] || message.phase;
+    if (['review', 'done', 'idle'].indexOf(message.phase) >= 0) setRunning(false);
   }
-  if (msg.type === 'SCREENED') renderReview(msg.screened);
-  if (msg.type === 'TRACKER_UPDATED') {
-    trackerRecords = msg.records || [];
+  if (message.type === 'SCREENED') {
+    currentScreened = message.screened || [];
+    renderReview();
+  }
+  if (message.type === 'PREVIEWED') {
+    currentPreviews = message.previews || {};
+    currentLastBatch = message.lastBatch || null;
+    if (message.screened) currentScreened = message.screened;
+    renderReview();
+    renderPreviews();
+    setRunning(false);
+    $('progText').textContent = '';
+  }
+  if (message.type === 'TRACKER_UPDATED') {
+    trackerRecords = message.records || [];
     renderTracker();
   }
-  if (msg.type === 'PREVIEWED') {
-    currentPreviews = msg.previews || {};
-    currentLastBatch = msg.lastBatch || null;
-    renderReview(currentScreened);
+  if (message.type === 'DONE') {
+    currentLastBatch = message.lastBatch || null;
     setRunning(false);
     $('progText').textContent = '';
-  }
-  if (msg.type === 'DONE') {
-    currentLastBatch = msg.lastBatch || null;
-    $('runMode').value = 'preview';
-    updateRunModeUI();
-    setRunning(false);
-    $('progText').textContent = '';
+    refreshTracker().catch(() => {});
   }
 });
 
 function addLog(text, level) {
   level = level || 'info';
   const now = new Date();
-  const t = [now.getHours(), now.getMinutes(), now.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
-  const el = document.createElement('div');
-  el.className = 'log-item ' + level;
-  el.innerHTML = '<span class="log-time">[' + t + ']</span>' + esc(text);
-  $('log').appendChild(el);
+  const time = [now.getHours(), now.getMinutes(), now.getSeconds()]
+    .map(value => String(value).padStart(2, '0')).join(':');
+  const element = document.createElement('div');
+  element.className = 'log-item ' + level;
+  element.innerHTML = '<span class="log-time">[' + time + ']</span>' + esc(text);
+  $('log').appendChild(element);
   $('log').scrollTop = $('log').scrollHeight;
+  if (level === 'error') $('logDetails').open = true;
 }
+
+$('clearLog').addEventListener('click', event => {
+  event.preventDefault();
+  event.stopPropagation();
+  $('log').innerHTML = '';
+});
+
+loadConfig().then(async () => {
+  await restoreState();
+  await refreshTracker();
+}).catch(error => addLog('配置或状态载入失败：' + error.message, 'error'));
