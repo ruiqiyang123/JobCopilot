@@ -9,7 +9,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Edge%20%7C%20Chrome-brightgreen.svg)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-orange.svg)
-![AI](https://img.shields.io/badge/AI-DeepSeek-purple.svg)
+![AI](https://img.shields.io/badge/AI-MiMo%20%7C%20DeepSeek%20%7C%20Custom-purple.svg)
 
 [功能特性](#-功能特性) · [快速开始](#-快速开始) · [工作流程](#-工作流程) · [免责声明](#️-免责声明)
 
@@ -29,8 +29,8 @@
 
 ## ✨ 功能特性
 
-- 🔍 **自动搜索收集**：按关键词、城市、行业、公司规模自动抓取岗位，数量自定义
-- 🤖 **AI 智能筛选**：DeepSeek 结合你的简历，自动剔除不匹配/超纲岗位，只投够得着的
+- 🔍 **自动搜索收集**：按关键词、城市自动抓取岗位，数量自定义
+- 🤖 **可配置 AI 筛选**：支持 Xiaomi MiMo、DeepSeek 和自定义 HTTPS OpenAI 兼容接口
 - ✍️ **千岗千面招呼语**：每个岗位单独生成「熟悉 XXX、做过 XXX」格式招呼语，精准对口
 - ✅ **审核确认机制**：投递前列出匹配岗位（含筛选理由），你勾选确认，绝不盲投
 - 📎 **自动发送简历**：先发简历图片，再发招呼语，一个岗位完整闭环再投下一个
@@ -56,24 +56,35 @@
 
 ### 1. 下载
 ```bash
-git clone https://github.com/huluobo2237-pixel/JobCopilot.git
+git clone https://github.com/ruiqiyang123/JobCopilot.git
 ```
 或直接 `Code → Download ZIP` 解压。
 
 ### 2. 加载扩展（Edge / Chrome 通用）
 1. 打开 `edge://extensions`（Chrome 为 `chrome://extensions`）
 2. 打开右上角 **开发者模式**
-3. 点 **加载解压缩的扩展**，选择项目文件夹
+3. 点 **加载解压缩的扩展**，选择仓库中包含 `manifest.json` 的 `JobCopilot · AI` 文件夹
 4. 点击扩展图标，打开侧边栏
 
 ### 3. 配置
 | 配置项 | 说明 |
 |--------|------|
-| DeepSeek API Key | 用于 AI 筛选和生成招呼语，[官网申请](https://platform.deepseek.com/) |
+| AI 服务商 | 默认 Xiaomi MiMo，也可选择 DeepSeek 或自定义 HTTPS OpenAI 兼容接口 |
+| API Key | 用于 AI 筛选和生成招呼语；从所选服务商控制台创建 |
+| API 地址 / 模型 | 内置服务商自动填充；自定义模式下由用户填写 |
 | 简历图片 | 投递时发给 HR 的简历截图 |
 | 简历文字 | 用于让 AI 生成更精准的招呼语 |
 | 关键词 / 城市 | 岗位搜索条件 |
 | 收集数量 | 每次抓取的岗位数 |
+
+保存前可点击 **测试连接**。测试请求只检查模型接口，不会打开 BOSS 页面或执行投递。
+
+#### Xiaomi MiMo 默认配置
+
+```text
+Base URL: https://api.xiaomimimo.com/v1
+Model: mimo-v2.5
+```
 
 ### 4. 使用
 **开始收集 + AI 筛选** → 在 **审核确认** 区勾选要投的岗位 → **投递选中** → 看着日志自动跑完。
@@ -93,19 +104,26 @@ git clone https://github.com/huluobo2237-pixel/JobCopilot.git
 ## 🛠️ 技术栈
 
 - **浏览器扩展**：Manifest V3，原生 JavaScript，无框架
-- **AI 模型**：DeepSeek（`deepseek-chat`）做岗位筛选与招呼语生成
+- **AI 模型**：Xiaomi MiMo、DeepSeek 或自定义 OpenAI 兼容模型
 - **架构**：Service Worker 编排 + Content Scripts 操作页面 + 侧边栏 UI
 
 ## 📁 项目结构
 
 ```
 src/
-├── background.js      # 核心编排：收集→筛选→投递 + DeepSeek 调用
+├── llm-client.js      # 模型供应商预设、请求、迁移和错误处理
+├── background.js      # 核心编排：收集→筛选→投递 + 通用模型调用
 ├── content-search.js  # 搜索页：抓取岗位 + 建立联系
 ├── content-chat.js    # 聊天页：发送简历图片 + 招呼语
 ├── selectors.js       # DOM 选择器与城市编码
 └── sidepanel.*        # 侧边栏界面（配置 / 审核 / 日志）
 ```
+
+## 🔐 数据与密钥
+
+- API Key 通过插件侧边栏填写，仅保存在浏览器的扩展本地存储中，不写入代码或仓库。
+- AI 筛选和招呼语生成会把简历文字、岗位信息及相关 JD 发送给你选择的模型供应商。
+- 自定义模型接口仅允许 HTTPS；插件会单独请求该接口域名的访问权限，不会永久申请所有网站权限。
 
 ## ⚠️ 免责声明
 
