@@ -47,6 +47,14 @@ test('侧边栏提供模型配置、迁移、域名授权和测试连接', () =>
   assert.match(sidepanelJs, /chrome\.permissions\.contains/);
   assert.match(sidepanelJs, /TEST_LLM/);
   assert.doesNotMatch(sidepanelJs, /const CFG_FIELDS = \['dsKey'/);
+
+  const permissionStart = sidepanelJs.indexOf('async function ensureCustomHostPermission');
+  const permissionEnd = sidepanelJs.indexOf('function llmStorageFrom', permissionStart);
+  const permissionBody = sidepanelJs.slice(permissionStart, permissionEnd);
+  assert.ok(
+    permissionBody.indexOf('permissionRequest(origin)') < permissionBody.indexOf('permissionContains(origin)'),
+    'permissions.request 必须先在用户手势中触发，再检查授权结果'
+  );
 });
 
 test('Manifest 固定授权 MiMo，并把其他 HTTPS 域名设为可选', () => {

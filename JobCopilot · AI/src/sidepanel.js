@@ -91,8 +91,9 @@ async function ensureCustomHostPermission(config) {
   if (config.provider !== 'custom') return true;
   const normalized = LLMClient.validateConfig(config);
   const origin = new URL(normalized.baseUrl).origin + '/*';
-  if (await permissionContains(origin)) return true;
-  return permissionRequest(origin);
+  const granted = await permissionRequest(origin);
+  if (!granted) return false;
+  return permissionContains(origin);
 }
 
 function llmStorageFrom(config) {
