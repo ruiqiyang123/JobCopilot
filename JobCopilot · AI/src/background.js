@@ -181,20 +181,28 @@ async function testLLMConnection(config) {
 }
 
 // ── 标签页与内容脚本 ──
-function waitTabComplete(tabId) {
-  return new Promise(resolve => {
+function waitTabComplete(tabId, timeoutMs) {
+  const timeout = Number(timeoutMs) || 20000;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => finish(new Error('页面加载超时，请检查网络或重新登录 BOSS')), timeout);
+    function finish(error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      chrome.tabs.onUpdated.removeListener(listener);
+      if (error) reject(error);
+      else setTimeout(resolve, 1000);
+    }
     function listener(id, info) {
       if (id === tabId && info.status === 'complete') {
-        chrome.tabs.onUpdated.removeListener(listener);
-        setTimeout(resolve, 1000);
+        finish();
       }
     }
     chrome.tabs.onUpdated.addListener(listener);
     chrome.tabs.get(tabId, tab => {
-      if (tab && tab.status === 'complete') {
-        chrome.tabs.onUpdated.removeListener(listener);
-        setTimeout(resolve, 1000);
-      }
+      if (chrome.runtime.lastError) return finish(new Error(chrome.runtime.lastError.message));
+      if (tab && tab.status === 'complete') finish();
     });
   });
 }
@@ -203,11 +211,23 @@ function curUrl(tabId) {
   return new Promise(resolve => chrome.tabs.get(tabId, tab => resolve((tab && tab.url) || '')));
 }
 
-function sendToTab(tabId, message) {
+function sendToTab(tabId, message, timeoutMs) {
+  const timeout = Number(timeoutMs) || 12000;
   return new Promise(resolve => {
+    let settled = false;
+    const timeoutId = setTimeout(() => finish({
+      success: false,
+      error: '页面脚本响应超时，请刷新扩展后重试'
+    }), timeout);
+    function finish(response) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      resolve(response);
+    }
     chrome.tabs.sendMessage(tabId, message, response => {
-      if (chrome.runtime.lastError) resolve({ success: false, error: chrome.runtime.lastError.message });
-      else resolve(response || { success: false, error: '页面脚本没有响应' });
+      if (chrome.runtime.lastError) finish({ success: false, error: chrome.runtime.lastError.message });
+      else finish(response || { success: false, error: '页面脚本没有响应' });
     });
   });
 }
@@ -248,9 +268,14 @@ async function createDetailTab(detailUrl, active) {
   const url = JobDetail.canonicalizeDetailUrl(detailUrl);
   if (!url) throw new Error('岗位详情链接缺失或无效');
   const tab = await chrome.tabs.create({ url: url, active: active === true });
-  await waitTabComplete(tab.id);
-  await ensureInjected(tab.id, 'src/content-search.js');
-  return tab;
+  try {
+    await waitTabComplete(tab.id);
+    await ensureInjected(tab.id, 'src/content-search.js');
+    return tab;
+  } catch (error) {
+    await removeTab(tab.id);
+    throw error;
+  }
 }
 
 async function removeTab(tabId) {
@@ -535,35 +560,72 @@ function previewInputs(job, cfg, plan, jd) {
   };
 }
 
-async function runPreview(jobIds) {
+function createPreviewRunId() {
+  return 'preview-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+
+function pushPreviewProgress(prepared, jobId, stage, completed, error, preview) {
+  chrome.runtime.sendMessage({
+    type: 'PREVIEW_PROGRESS',
+    runId: prepared.runId,
+    jobId: jobId,
+    stage: stage,
+    completed: completed,
+    total: prepared.ids.length,
+    error: error || '',
+    preview: preview || null
+  }).catch(() => {});
+}
+
+async function preparePreviewRun(jobIds) {
+  await hydrateReviewState();
+  const cfg = await getCfg();
+  const plan = GreetingPlans.validateForSend(selectedGreetingPlan(cfg));
+  const requested = Array.from(new Set((Array.isArray(jobIds) && jobIds.length
+    ? jobIds
+    : state.screened.filter(job => job.reviewStatus === 'approved').map(job => job.id))
+    .map(id => String(id || '').trim()).filter(Boolean)));
+  const ids = requested.filter(id => {
+    const job = findScreened(id);
+    return job && job.reviewStatus === 'approved' && !state.processed[id];
+  });
+  if (!ids.length) throw new Error('没有已批准的岗位可预演');
+  return {
+    runId: createPreviewRunId(),
+    cfg: cfg,
+    plan: plan,
+    requested: requested,
+    ids: ids
+  };
+}
+
+async function runPreview(prepared) {
   state.aborted = false;
   state.paused = false;
   state.results = [];
   state.phase = 'previewing';
   pushPhase();
-  await hydrateReviewState();
-  const cfg = await getCfg();
-  const plan = GreetingPlans.validateForSend(selectedGreetingPlan(cfg));
-  const requested = Array.isArray(jobIds) && jobIds.length
-    ? jobIds.slice()
-    : state.screened.filter(job => job.reviewStatus === 'approved').map(job => job.id);
-  const ids = requested.filter(id => {
-    const job = findScreened(id);
-    return job && job.reviewStatus === 'approved' && !state.processed[id];
-  });
+  const cfg = prepared.cfg;
+  const plan = prepared.plan;
+  const requested = prepared.requested;
+  const ids = prepared.ids;
 
   state.lastBatch = {
     mode: 'preview', status: 'running', startedAt: Date.now(),
+    runId: prepared.runId,
     greetingPlanId: plan.id, requestedIds: requested, executedIds: ids.slice(),
     succeeded: [], failed: [], notRun: []
   };
-  if (!ids.length) return finishPreviewWithoutJobs('没有已批准的岗位可预演');
 
   progress(0, ids.length, '预演');
+  ids.forEach(id => pushPreviewProgress(prepared, id, 'queued', 0));
   for (let index = 0; index < ids.length; index++) {
     if (state.aborted) {
       state.lastBatch.status = 'stopped';
       state.lastBatch.notRun = ids.slice(index);
+      state.lastBatch.notRun.forEach(id => {
+        pushPreviewProgress(prepared, id, 'not_run', state.lastBatch.succeeded.length);
+      });
       break;
     }
     await waitIfPaused();
@@ -571,11 +633,16 @@ async function runPreview(jobIds) {
     try {
       if (!original) throw new Error('找不到岗位数据');
       log('[' + (index + 1) + '/' + ids.length + '] 预演 ' + original.name + ' - ' + (original.company || ''));
+      pushPreviewProgress(prepared, original.id, 'reading_detail', state.lastBatch.succeeded.length);
       const detail = await readJobDetail(original, cfg);
       const current = JobDetail.mergeDetail(original, Object.assign({}, detail.currentJob, { jd: detail.jd || '' }));
+      pushPreviewProgress(prepared, original.id, 'verifying', state.lastBatch.succeeded.length);
       const verified = WorkflowSafety.verifyEligibility(original, current, cfg.jobFilterConfig, state.processed);
       if (!verified.ok) throw new Error(verified.reasons.join('；'));
       verified.job.reviewStatus = original.reviewStatus;
+      if (plan.aiOpeningEnabled) {
+        pushPreviewProgress(prepared, original.id, 'generating_opening', state.lastBatch.succeeded.length);
+      }
       const aiOpening = plan.aiOpeningEnabled ? await generateAiOpening(cfg, plan, verified.job, detail.jd || '') : '';
       if (plan.aiOpeningEnabled && !aiOpening) throw new Error('AI 个性化开场生成失败');
       const preview = ReviewWorkflow.createPreview(
@@ -587,6 +654,7 @@ async function runPreview(jobIds) {
       state.lastBatch.succeeded.push(original.id);
       progress(index + 1, ids.length, '预演');
       await persistReviewState();
+      pushPreviewProgress(prepared, original.id, 'draft', state.lastBatch.succeeded.length, '', preview);
     } catch (error) {
       const message = error && error.message ? error.message : '预演失败';
       state.previews[ids[index]] = {
@@ -596,6 +664,13 @@ async function runPreview(jobIds) {
       state.lastBatch.status = 'failed';
       state.lastBatch.failed.push({ id: ids[index], error: message });
       state.lastBatch.notRun = ids.slice(index + 1);
+      pushPreviewProgress(
+        prepared, ids[index], 'failed', state.lastBatch.succeeded.length,
+        message, state.previews[ids[index]]
+      );
+      state.lastBatch.notRun.forEach(id => {
+        pushPreviewProgress(prepared, id, 'not_run', state.lastBatch.succeeded.length);
+      });
       log('预演失败，已停止批次：' + message, 'error');
       break;
     }
@@ -606,18 +681,35 @@ async function runPreview(jobIds) {
   state.phase = 'review';
   pushPhase();
   chrome.runtime.sendMessage({
-    type: 'PREVIEWED', previews: state.previews, lastBatch: state.lastBatch, screened: state.screened
+    type: 'PREVIEWED', runId: prepared.runId, previews: state.previews,
+    lastBatch: state.lastBatch, screened: state.screened
   }).catch(() => {});
 }
 
-async function finishPreviewWithoutJobs(message) {
-  state.lastBatch.status = 'failed';
-  state.lastBatch.failed.push({ id: '', error: message });
-  state.lastBatch.finishedAt = Date.now();
-  await persistReviewState();
-  log(message, 'warn');
+async function handlePreviewRunError(error, prepared) {
+  const message = (error && error.message) || '预演失败';
+  const succeeded = state.lastBatch && Array.isArray(state.lastBatch.succeeded)
+    ? state.lastBatch.succeeded.slice() : [];
+  const failedIds = state.lastBatch && Array.isArray(state.lastBatch.failed)
+    ? state.lastBatch.failed.map(item => item.id) : [];
+  const notRun = prepared.ids.filter(id => succeeded.indexOf(id) < 0 && failedIds.indexOf(id) < 0);
+  state.lastBatch = Object.assign({
+    mode: 'preview', runId: prepared.runId, startedAt: Date.now(),
+    greetingPlanId: prepared.plan.id, requestedIds: prepared.requested,
+    executedIds: prepared.ids.slice(), succeeded: succeeded, failed: []
+  }, state.lastBatch || {}, {
+    status: 'failed', notRun: notRun, finishedAt: Date.now()
+  });
+  if (!state.lastBatch.failed.length) state.lastBatch.failed.push({ id: '', error: message });
+  notRun.forEach(id => pushPreviewProgress(prepared, id, 'not_run', succeeded.length));
+  await persistReviewState().catch(() => {});
+  log('预演失败：' + message, 'error');
   state.phase = 'review';
   pushPhase();
+  chrome.runtime.sendMessage({
+    type: 'PREVIEWED', runId: prepared.runId, previews: state.previews,
+    lastBatch: state.lastBatch, screened: state.screened, error: message
+  }).catch(() => {});
 }
 
 async function confirmPreview(jobId, aiOpening) {
@@ -781,8 +873,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true }); return;
   }
   if (message.type === 'START_PREVIEW') {
-    runPreview(message.jobIds).catch(error => handleAsyncRunError(error, 'review', '预演'));
-    sendResponse({ ok: true }); return;
+    preparePreviewRun(message.jobIds)
+      .then(prepared => {
+        sendResponse({
+          ok: true,
+          result: { runId: prepared.runId, jobIds: prepared.ids, total: prepared.ids.length }
+        });
+        runPreview(prepared).catch(error => handlePreviewRunError(error, prepared));
+      })
+      .catch(error => sendResponse({ ok: false, error: error.message || '预演启动失败' }));
+    return true;
   }
   if (message.type === 'START_DELIVER') {
     runDeliver(message.jobIds).catch(error => handleAsyncRunError(error, 'review', '正式投递'));

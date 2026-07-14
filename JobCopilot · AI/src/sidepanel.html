@@ -128,6 +128,7 @@
     <div class="card-title"><span>⑤ 投递预演</span><span id="previewSummary">0 个已确认</span></div>
     <div class="card-b">
       <div class="safety-note">预演只生成最终内容；确认后才可进入正式投递。</div>
+      <div id="previewRunError" class="preview-run-error hidden" role="alert" aria-live="assertive"></div>
       <div id="previewList"><div class="empty">批准岗位后点击“预演已批准岗位”</div></div>
       <button class="btn-live" id="btnDeliver" disabled>暂无可正式投递岗位</button>
       <div id="deliverDisabledReason" class="disabled-reason">需要先批准岗位并确认预演</div>
@@ -161,6 +162,7 @@
   <script src="job-detail.js"></script>
   <script src="greeting-plans.js"></script>
   <script src="review-workflow.js"></script>
+  <script src="preview-run-state.js"></script>
   <script src="job-tracker.js"></script>
   <script src="sidepanel.js"></script>
 </body>

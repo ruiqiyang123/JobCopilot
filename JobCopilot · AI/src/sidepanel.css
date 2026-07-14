@@ -97,6 +97,9 @@ input[type=file] { width: 100%; font-size: 11px; }
 .preview-status { color: var(--muted); font-size: 11px; }
 .preview-status.confirmed { color: var(--green); font-weight: 700; }
 .preview-status.failed, .disabled-reason { color: var(--red); }
+.preview-status.running { color: var(--accent-dark); font-weight: 700; }
+.preview-status.not-run { color: var(--muted); font-style: italic; }
+.preview-run-error { margin-top: 8px; padding: 8px; border: 1px solid #efb0b0; border-radius: 6px; background: #fff0f0; color: var(--red); font-size: 11.5px; }
 .disabled-reason { margin-top: 5px; text-align: center; font-size: 11px; }
 .tracker-status { width: 94px; padding: 5px; font-size: 11px; }
 .log-card summary { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; font-weight: 750; cursor: pointer; }

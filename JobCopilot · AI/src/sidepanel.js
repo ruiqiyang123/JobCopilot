@@ -13,6 +13,7 @@ let greetingPlansState = GreetingPlans.normalizeState();
 let trackerRecords = [];
 let currentReviewTab = 'pending_review';
 let editingResumeImage = '';
+let currentPreviewRun = null;
 
 function esc(value) {
   return String(value || '').replace(/[&<>"]/g, character => ({
@@ -352,6 +353,7 @@ $('btnCollect').addEventListener('click', async () => {
   currentScreened = [];
   currentPreviews = {};
   currentLastBatch = null;
+  currentPreviewRun = null;
   currentReviewTab = 'pending_review';
   renderReview();
   renderPreviews();
@@ -369,6 +371,10 @@ $('btnPause').addEventListener('click', () => {
 });
 $('btnStop').addEventListener('click', () => {
   chrome.runtime.sendMessage({ type: 'STOP' });
+  if (PreviewRunState.isRunning(currentPreviewRun)) {
+    currentPreviewRun = PreviewRunState.finish(currentPreviewRun, 'stopped');
+    renderPreviews();
+  }
   setRunning(false);
 });
 $('btnReset').addEventListener('click', () => {
@@ -377,6 +383,7 @@ $('btnReset').addEventListener('click', () => {
   currentScreened = [];
   currentPreviews = {};
   currentLastBatch = null;
+  currentPreviewRun = null;
   renderReview();
   renderPreviews();
   setRunning(false);
@@ -457,7 +464,7 @@ function renderReview() {
   $('reviewList').innerHTML = visible.map(renderReviewCard).join('')
     || '<div class="empty">当前分类没有岗位</div>';
   $('approvedSummary').textContent = '已批准 ' + counts.approved + ' 个';
-  $('btnPreview').disabled = counts.approved === 0;
+  renderPreviewButton(counts.approved);
   renderPreviews();
 }
 
@@ -494,17 +501,60 @@ $('reviewList').addEventListener('click', async event => {
 });
 
 // ── 预演与正式投递 ──
+function renderPreviewButton(approvedCount) {
+  const running = PreviewRunState.isRunning(currentPreviewRun);
+  $('btnPreview').disabled = approvedCount === 0 || running;
+  $('btnPreview').textContent = running
+    ? '预演中 ' + currentPreviewRun.completed + '/' + currentPreviewRun.total
+    : '预演已批准岗位';
+}
+
+function renderPreviewRunError() {
+  const error = currentPreviewRun && currentPreviewRun.status === 'failed'
+    ? currentPreviewRun.error : '';
+  $('previewRunError').textContent = error || '';
+  $('previewRunError').classList.toggle('hidden', !error);
+}
+
 $('btnPreview').addEventListener('click', async () => {
-  try { GreetingPlans.validateForSend(selectedPlan()); }
-  catch (error) { return addLog(error.message, 'error'); }
   const ids = normalizedJobs().filter(job => job.reviewStatus === 'approved').map(job => job.id);
   if (!ids.length) return addLog('请先批准至少一个岗位', 'error');
-  setRunning(true);
-  addLog('开始预演 ' + ids.length + ' 个已批准岗位', 'info');
-  chrome.runtime.sendMessage({ type: 'START_PREVIEW', jobIds: ids });
+  currentPreviewRun = PreviewRunState.start(ids, '');
+  renderPreviews();
+  try {
+    GreetingPlans.validateForSend(selectedPlan());
+    setRunning(true);
+    addLog('开始预演 ' + ids.length + ' 个已批准岗位', 'info');
+    const response = await runtimeMessage({ type: 'START_PREVIEW', jobIds: ids });
+    if (!response.ok) throw new Error(response.error || '预演启动失败');
+    currentPreviewRun = PreviewRunState.attach(
+      currentPreviewRun,
+      response.result && response.result.runId,
+      response.result && response.result.jobIds
+    );
+    renderPreviews();
+  } catch (error) {
+    currentPreviewRun = PreviewRunState.failStart(currentPreviewRun, error.message);
+    setRunning(false);
+    renderPreviews();
+    addLog(error.message, 'error');
+  }
 });
 
+function renderRunningPreviewItem(job, runJob) {
+  const label = PreviewRunState.STAGE_LABELS[runJob.stage] || '等待预演';
+  const className = runJob.stage === 'failed'
+    ? 'failed' : (runJob.stage === 'not_run' ? 'not-run' : 'running');
+  const detail = runJob.stage === 'failed' && runJob.error
+    ? '<div class="job-reason skip">' + esc(runJob.error) + '</div>' : '';
+  return '<article class="preview-item"><div class="job-head"><div class="job-title">'
+    + esc(job.name) + '</div><span class="preview-status ' + className + '">' + esc(label) + '</span></div>'
+    + detail + '</article>';
+}
+
 function renderPreviewItem(job, preview) {
+  const runJob = PreviewRunState.jobState(currentPreviewRun, job.id);
+  if (runJob && runJob.stage !== 'draft') return renderRunningPreviewItem(job, runJob);
   if (!preview) {
     return '<article class="preview-item"><div class="job-title">' + esc(job.name) + '</div>'
       + '<div class="preview-status">等待预演</div></article>';
@@ -540,6 +590,8 @@ function renderPreviews() {
     : '<div class="empty">批准岗位后点击“预演已批准岗位”</div>';
   const ready = confirmedApprovedJobs();
   $('previewSummary').textContent = ready.length + ' 个已确认';
+  renderPreviewButton(approved.length);
+  renderPreviewRunError();
   $('btnDeliver').disabled = ready.length === 0;
   $('btnDeliver').textContent = ready.length ? '正式投递 ' + ready.length + ' 个已批准岗位' : '暂无可正式投递岗位';
   $('deliverDisabledReason').textContent = ready.length
@@ -652,6 +704,45 @@ $('trackerList').addEventListener('change', async event => {
 });
 
 // ── 恢复与消息 ──
+function restorePreviewRun(lastBatch, phase) {
+  if (!lastBatch || lastBatch.mode !== 'preview') return null;
+  const ids = (lastBatch.executedIds || lastBatch.requestedIds || []).slice();
+  if (!ids.length) return null;
+  let restored = PreviewRunState.start(ids, lastBatch.runId || '');
+  const succeeded = Array.isArray(lastBatch.succeeded) ? lastBatch.succeeded : [];
+  succeeded.forEach((id, index) => {
+    restored = PreviewRunState.applyProgress(restored, {
+      runId: restored.runId, jobId: id, stage: 'draft',
+      completed: index + 1, total: ids.length
+    });
+  });
+  const failed = Array.isArray(lastBatch.failed) ? lastBatch.failed : [];
+  failed.forEach(item => {
+    if (!item.id) return;
+    restored = PreviewRunState.applyProgress(restored, {
+      runId: restored.runId, jobId: item.id, stage: 'failed',
+      completed: succeeded.length, total: ids.length, error: item.error || '预演失败'
+    });
+  });
+  const explicitNotRun = Array.isArray(lastBatch.notRun) ? lastBatch.notRun : [];
+  const interrupted = lastBatch.status === 'running' && phase !== 'previewing';
+  const notRun = interrupted
+    ? ids.filter(id => succeeded.indexOf(id) < 0 && !failed.some(item => item.id === id))
+    : explicitNotRun;
+  notRun.forEach(id => {
+    restored = PreviewRunState.applyProgress(restored, {
+      runId: restored.runId, jobId: id, stage: 'not_run',
+      completed: succeeded.length, total: ids.length
+    });
+  });
+  if (lastBatch.status === 'running' && !interrupted) return restored;
+  const status = interrupted ? 'failed' : lastBatch.status;
+  const error = interrupted
+    ? '上次预演未正常完成，请重新预演'
+    : ((failed[0] && failed[0].error) || '');
+  return PreviewRunState.finish(restored, status, error);
+}
+
 async function restoreState() {
   const response = await runtimeMessage({ type: 'GET_STATE' });
   if (!response.ok) throw new Error(response.error || '状态读取失败');
@@ -659,6 +750,7 @@ async function restoreState() {
   currentScreened = result.screened || [];
   currentPreviews = result.previews || {};
   currentLastBatch = result.lastBatch || null;
+  currentPreviewRun = restorePreviewRun(currentLastBatch, result.phase);
   if (result.greetingPlansState) {
     greetingPlansState = GreetingPlans.normalizeState(result.greetingPlansState);
     renderPlanPicker();
@@ -684,9 +776,26 @@ chrome.runtime.onMessage.addListener(message => {
     currentScreened = message.screened || [];
     renderReview();
   }
+  if (message.type === 'PREVIEW_PROGRESS') {
+    if (!currentPreviewRun) {
+      const ids = normalizedJobs().filter(job => job.reviewStatus === 'approved').map(job => job.id);
+      currentPreviewRun = PreviewRunState.start(ids, message.runId || '');
+    }
+    currentPreviewRun = PreviewRunState.applyProgress(currentPreviewRun, message);
+    if (message.preview && message.jobId) currentPreviews[message.jobId] = message.preview;
+    renderPreviews();
+  }
   if (message.type === 'PREVIEWED') {
+    if (currentPreviewRun && currentPreviewRun.runId && message.runId
+        && currentPreviewRun.runId !== message.runId) return;
     currentPreviews = message.previews || {};
     currentLastBatch = message.lastBatch || null;
+    const batchStatus = (currentLastBatch && currentLastBatch.status) || (message.error ? 'failed' : 'completed');
+    const batchError = message.error || (currentLastBatch && currentLastBatch.failed
+      && currentLastBatch.failed[0] && currentLastBatch.failed[0].error) || '';
+    if (currentPreviewRun) {
+      currentPreviewRun = PreviewRunState.finish(currentPreviewRun, batchStatus, batchError);
+    }
     if (message.screened) currentScreened = message.screened;
     renderReview();
     renderPreviews();
