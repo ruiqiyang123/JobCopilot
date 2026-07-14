@@ -12,8 +12,34 @@
   <section class="card">
     <div class="card-h" data-toggle="cfgBody"><span>① 配置</span><span class="chev">▾</span></div>
     <div class="card-b" id="cfgBody">
-      <label>DeepSeek API Key</label>
-      <input type="password" id="dsKey" placeholder="sk- 开头">
+      <label>AI 服务商</label>
+      <select id="llmProvider">
+        <option value="xiaomi">Xiaomi MiMo</option>
+        <option value="deepseek">DeepSeek</option>
+        <option value="custom">自定义 OpenAI 兼容接口</option>
+      </select>
+
+      <label>API Key</label>
+      <input type="password" id="llmApiKey" placeholder="在服务商控制台创建" autocomplete="off">
+
+      <label>API 地址</label>
+      <input type="text" id="llmBaseUrl" placeholder="https://api.example.com/v1">
+
+      <label>模型名称</label>
+      <input type="text" id="llmModel" placeholder="如：mimo-v2.5">
+
+      <div id="llmAuthRow" style="display:none">
+        <label>鉴权方式</label>
+        <select id="llmAuthType">
+          <option value="bearer">Authorization: Bearer</option>
+          <option value="api-key">api-key 请求头</option>
+        </select>
+      </div>
+
+      <div class="llm-actions">
+        <button type="button" class="btn-secondary" id="testLlm">测试连接</button>
+        <span id="llmTestStatus" class="test-status" aria-live="polite"></span>
+      </div>
 
       <label>简历图片（投递时发给HR）</label>
       <input type="file" id="resumeImg" accept="image/*">
@@ -71,6 +97,7 @@
     <div class="log" id="log"></div>
   </section>
 
+  <script src="llm-client.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>
