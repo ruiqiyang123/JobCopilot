@@ -349,3 +349,35 @@ test('进度看板只管理插件岗位并持久化手动状态', () => {
   assert.match(sidepanelJs, /UPDATE_TRACKER_STATUS/);
   assert.doesNotMatch(background, /扫描.*BOSS.*历史|IMPORT_BOSS_HISTORY/);
 });
+
+test('后台逐岗位持久化投递结果并保留历史与配置', () => {
+  const background = read('src/background.js');
+
+  assert.match(background, /importScripts\([^)]*batch-lifecycle\.js/);
+  assert.match(background, /BatchLifecycle\.migrate/);
+  assert.match(background, /BatchLifecycle\.markSucceeded/);
+  assert.match(background, /BatchLifecycle\.markFailed/);
+  assert.match(background, /BatchLifecycle\.markNotRun/);
+  assert.match(background, /type: 'DELIVERY_STATE_UPDATED'/);
+  const deliverStart = background.indexOf('async function runDeliver');
+  const deliverEnd = background.indexOf('async function finishDeliverWithError', deliverStart);
+  const deliverBody = background.slice(deliverStart, deliverEnd);
+  assert.ok(
+    deliverBody.indexOf('markDeliverySucceeded') < deliverBody.indexOf('markTrackerContacted(job)'),
+    '成功状态必须先于岗位进度写入，避免重复投递'
+  );
+
+  const snapshotStart = background.indexOf('async function currentStateSnapshot');
+  const snapshotEnd = background.indexOf('function handleAsyncRunError', snapshotStart);
+  assert.match(background.slice(snapshotStart, snapshotEnd), /screened: state\.screened/);
+
+  const resetStart = background.indexOf("if (message.type === 'RESET')");
+  const resetEnd = background.indexOf("if (message.type === 'GET_STATE')", resetStart);
+  const resetBody = background.slice(resetStart, resetEnd);
+  assert.match(resetBody, /sw_jobs/);
+  assert.match(resetBody, /sw_screened/);
+  assert.match(resetBody, /sw_previews/);
+  assert.doesNotMatch(resetBody, /remove\([^)]*processed/);
+  assert.doesNotMatch(resetBody, /remove\([^)]*jobTrackerRecords/);
+  assert.doesNotMatch(resetBody, /remove\([^)]*greetingPlansState/);
+});

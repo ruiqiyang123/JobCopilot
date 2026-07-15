@@ -1,7 +1,7 @@
 // ===== JobCopilot Service Worker：收集 → 完整 JD 筛选 → 人工批准 → 三段式投递 =====
 importScripts(
   '/src/selectors.js', '/src/job-filters.js', '/src/job-detail.js',
-  '/src/greeting-plans.js', '/src/review-workflow.js', '/src/workflow-safety.js',
+  '/src/greeting-plans.js', '/src/review-workflow.js', '/src/batch-lifecycle.js', '/src/workflow-safety.js',
   '/src/job-tracker.js', '/src/chat-navigation.js', '/src/contact-retry.js',
   '/src/storage-utils.js', '/src/llm-client.js'
 );
@@ -385,8 +385,37 @@ async function persistReviewState() {
     sw_screened: state.screened,
     sw_previews: state.previews,
     lastBatch: state.lastBatch,
-    greetingPlansState: state.greetingPlansState
+    greetingPlansState: state.greetingPlansState,
+    processed: state.processed
   });
+}
+
+function broadcastDeliveryState() {
+  chrome.runtime.sendMessage({
+    type: 'DELIVERY_STATE_UPDATED',
+    screened: state.screened,
+    lastBatch: state.lastBatch
+  }).catch(() => {});
+}
+
+function migrateDeliveryState() {
+  state.jobs = BatchLifecycle.migrate(state.jobs, state.processed, state.lastBatch);
+  state.screened = BatchLifecycle.migrate(state.screened, state.processed, state.lastBatch);
+}
+
+function markDeliverySucceeded(jobId, at) {
+  state.jobs = BatchLifecycle.markSucceeded(state.jobs, jobId, at);
+  state.screened = BatchLifecycle.markSucceeded(state.screened, jobId, at);
+}
+
+function markDeliveryFailed(jobId, error, step) {
+  state.jobs = BatchLifecycle.markFailed(state.jobs, jobId, error, step);
+  state.screened = BatchLifecycle.markFailed(state.screened, jobId, error, step);
+}
+
+function markDeliveryNotRun(jobIds) {
+  state.jobs = BatchLifecycle.markNotRun(state.jobs, jobIds);
+  state.screened = BatchLifecycle.markNotRun(state.screened, jobIds);
 }
 
 async function hydrateReviewState() {
@@ -404,6 +433,7 @@ async function hydrateReviewState() {
     });
   }
   if (saved.processed) state.processed = saved.processed;
+  migrateDeliveryState();
   await persistReviewState();
   if (saved.resumeImage) await chrome.storage.local.remove('resumeImage');
 }
@@ -918,8 +948,10 @@ async function runDeliver(jobIds) {
 
       state.results.push({ id: job.id, name: job.name, ok: true });
       state.lastBatch.succeeded.push(job.id);
+      markDeliverySucceeded(job.id, Date.now());
       state.processed[job.id] = 1;
-      await storageSet({ processed: state.processed });
+      await persistReviewState();
+      broadcastDeliveryState();
       try { await markTrackerContacted(job); }
       catch (error) { log('岗位已发送，但进度记录更新失败：' + error.message, 'warn'); }
       log('✓ 三段式投递成功', 'success');
@@ -930,14 +962,19 @@ async function runDeliver(jobIds) {
       if (state.aborted || (error && error.code === 'cancelled')) {
         state.lastBatch.status = 'stopped';
         state.lastBatch.notRun = ids.slice(index);
+        markDeliveryNotRun(state.lastBatch.notRun);
         log('投递已停止', 'warn');
       } else {
         state.results.push({ id: ids[index], name: job ? job.name : '未知岗位', ok: false, msg: message });
         state.lastBatch.status = 'failed';
         state.lastBatch.failed.push({ id: ids[index], step: state.lastBatch.currentStep, error: message });
         state.lastBatch.notRun = ids.slice(index + 1);
+        markDeliveryFailed(ids[index], message, state.lastBatch.currentStep);
+        markDeliveryNotRun(state.lastBatch.notRun);
         log('投递失败，已停止批次：' + message, 'error');
       }
+      await persistReviewState();
+      broadcastDeliveryState();
       break;
     } finally {
       await removeTabs(Array.from(temporaryTabIds));
@@ -950,6 +987,10 @@ async function finishDeliverWithError(jobId, message, notRun) {
   state.lastBatch.status = 'failed';
   state.lastBatch.failed.push({ id: jobId, error: message });
   state.lastBatch.notRun = notRun || [];
+  markDeliveryFailed(jobId, message, state.lastBatch.currentStep);
+  markDeliveryNotRun(state.lastBatch.notRun);
+  await persistReviewState();
+  broadcastDeliveryState();
   log('正式投递已阻止：' + message, 'error');
   await finishDeliver();
 }
@@ -968,7 +1009,8 @@ async function finishDeliver() {
   pushPhase();
   log('投递结束：成功 ' + success + ' | 失败 ' + failed, failed ? 'error' : 'success');
   chrome.runtime.sendMessage({
-    type: 'DONE', ok: success, fail: failed, lastBatch: state.lastBatch
+    type: 'DONE', ok: success, fail: failed, lastBatch: state.lastBatch,
+    screened: state.screened
   }).catch(() => {});
 }
 

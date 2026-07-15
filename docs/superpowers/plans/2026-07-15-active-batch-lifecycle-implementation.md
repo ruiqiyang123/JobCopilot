@@ -86,7 +86,7 @@ git commit -m "feat: add active batch lifecycle rules"
 - 修改：`JobCopilot · AI/src/background.js`
 - 修改：`JobCopilot · AI/tests/extension-integration.test.js`
 
-- [ ] **步骤 1：增加失败的集成断言**
+- [x] **步骤 1：增加失败的集成断言**
 
 断言以下不变量：
 
@@ -100,13 +100,13 @@ assert.ok(background.indexOf('BatchLifecycle.markSucceeded') < background.indexO
 
 同时验证 `currentStateSnapshot()` 返回迁移后的 `screened`，`RESET` 不删除 `processed`、`jobTrackerRecords`、模型或招呼方案配置。
 
-- [ ] **步骤 2：运行集成测试验证失败**
+- [x] **步骤 2：运行集成测试验证失败**
 
 运行：`node --test tests/extension-integration.test.js`
 
 预期：FAIL，提示缺少批次生命周期接入。
 
-- [ ] **步骤 3：接入加载、迁移和状态广播**
+- [x] **步骤 3：接入加载、迁移和状态广播**
 
 修改后台以满足：
 
@@ -129,13 +129,13 @@ chrome.runtime.sendMessage({
 
 成功状态必须先于岗位进度写入，确保岗位进度存储偶发失败时也不会重复发送。
 
-- [ ] **步骤 4：运行相关测试验证通过**
+- [x] **步骤 4：运行相关测试验证通过**
 
 运行：`node --test tests/batch-lifecycle.test.js tests/extension-integration.test.js`
 
 预期：全部 PASS。
 
-- [ ] **步骤 5：提交后台编排**
+- [x] **步骤 5：提交后台编排**
 
 ```bash
 git add 'JobCopilot · AI/src/background.js' 'JobCopilot · AI/tests/extension-integration.test.js'

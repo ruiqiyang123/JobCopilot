@@ -71,7 +71,8 @@
 
   function migrate(jobs, processed, lastBatch) {
     const sent = processed || {};
-    const batch = lastBatch || {};
+    const sourceBatch = lastBatch || {};
+    const batch = sourceBatch.mode && sourceBatch.mode !== 'live' ? {} : sourceBatch;
     const succeeded = new Set((batch.succeeded || []).map(id => String(id || '')));
     let result = normalizeJobs(jobs).map(job => {
       const id = String(job.id || '');

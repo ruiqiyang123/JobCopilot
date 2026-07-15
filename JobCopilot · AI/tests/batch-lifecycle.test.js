@@ -60,6 +60,19 @@ test('旧 processed 和最近批次结果迁移为明确投递状态且成功优
   assert.deepEqual(BatchLifecycle.activeJobs(migrated).map(job => job.id), ['c']);
 });
 
+test('预演批次结果不能被误当成正式投递状态', () => {
+  const migrated = BatchLifecycle.migrate(JOBS, {}, {
+    mode: 'preview',
+    succeeded: ['a'],
+    failed: [{ id: 'b', error: '预演失败' }],
+    notRun: ['c']
+  });
+
+  assert.deepEqual(migrated.map(job => job.deliveryStatus), [
+    'not_started', 'not_started', 'not_started'
+  ]);
+});
+
 test('最近批次摘要按唯一岗位计数', () => {
   const summary = BatchLifecycle.summarize({
     requestedIds: ['a', 'b', 'c', 'c'],
