@@ -27,11 +27,11 @@
 - 修改：`JobCopilot · AI/src/background.js`
 - 修改：`JobCopilot · AI/tests/extension-integration.test.js`
 
-- [ ] 先增加失败集成断言：后台加载 `search-strategy.js`，使用 `resolveTerms`、`mergeJobs` 和 `roundTarget`，搜索 URL 接受当前关键词。
-- [ ] 实现 `collectAcrossSearchTerms(cfg, limit)`：每轮依次搜索所有词，每词每轮最多扩大 5 个结果；按稳定 ID 去重；整轮无新增时停止；任一关键词搜索失败立即抛错并记录该词。
-- [ ] 日志显示搜索词数、原始卡片数、唯一岗位数和停滞原因。
-- [ ] 运行策略与集成测试，预期全部通过。
-- [ ] 提交 `feat: collect unique jobs across search terms`。
+- [x] 先增加失败集成断言：后台加载 `search-strategy.js`，使用 `resolveTerms`、`mergeJobs` 和 `roundTarget`，搜索 URL 接受当前关键词。
+- [x] 实现 `collectAcrossSearchTerms(cfg, limit)`：每轮依次搜索所有词，每词每轮最多扩大 5 个结果；按稳定 ID 去重；整轮无新增时停止；任一关键词搜索失败立即抛错并记录该词。
+- [x] 日志显示搜索词数、原始卡片数、唯一岗位数和停滞原因。
+- [x] 运行策略与集成测试，预期全部通过。
+- [x] 提交 `feat: collect unique jobs across search terms`。
 
 ### 任务 3：侧边栏配置、迁移和回归
 

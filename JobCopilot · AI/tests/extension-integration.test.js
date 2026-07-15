@@ -408,3 +408,24 @@ test('侧边栏只操作活动岗位并提供批次完成与下一批入口', ()
   assert.match(sidepanelJs, /开始下一批/);
   assert.match(sidepanelJs, /type: 'RESET'/);
 });
+
+test('后台按多关键词公平轮询并在读取详情前跨搜索去重', () => {
+  const background = read('src/background.js');
+
+  assert.match(background, /importScripts\([^)]*search-strategy\.js/);
+  assert.match(background, /SearchStrategy\.resolveTerms/);
+  assert.match(background, /SearchStrategy\.roundTarget/);
+  assert.match(background, /SearchStrategy\.mergeJobs/);
+  assert.match(background, /async function collectAcrossSearchTerms/);
+  assert.match(background, /buildSearchUrl\(cfg, keyword\)/);
+  assert.match(background, /getSearchTab\(cfg, keyword\)/);
+
+  const collectStart = background.indexOf('async function runCollect');
+  const collectEnd = background.indexOf('function stopWithConfigError', collectStart);
+  const collectBody = background.slice(collectStart, collectEnd);
+  assert.match(collectBody, /collectAcrossSearchTerms\(cfg, count\)/);
+  assert.ok(
+    collectBody.indexOf('collectAcrossSearchTerms') < collectBody.indexOf('hydrateJobDetails'),
+    '必须先完成跨关键词去重，再读取岗位详情'
+  );
+});

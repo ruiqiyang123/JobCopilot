@@ -1,7 +1,8 @@
 // ===== JobCopilot Service Worker：收集 → 完整 JD 筛选 → 人工批准 → 三段式投递 =====
 importScripts(
   '/src/selectors.js', '/src/job-filters.js', '/src/job-detail.js',
-  '/src/greeting-plans.js', '/src/review-workflow.js', '/src/batch-lifecycle.js', '/src/workflow-safety.js',
+  '/src/greeting-plans.js', '/src/review-workflow.js', '/src/batch-lifecycle.js', '/src/search-strategy.js',
+  '/src/workflow-safety.js',
   '/src/job-tracker.js', '/src/chat-navigation.js', '/src/contact-retry.js',
   '/src/storage-utils.js', '/src/llm-client.js'
 );
@@ -9,7 +10,7 @@ importScripts(
 const CFG_KEYS = [
   'llmProvider', 'llmApiKey', 'llmBaseUrl', 'llmModel', 'llmAuthType', 'dsKey',
   'resumeText', 'resumeImage', 'city', 'keyword', 'count', 'jobFilterConfig',
-  'greetingPlansState'
+  'searchMatchMode', 'keywordExpansionEnabled', 'greetingPlansState'
 ];
 
 let state = {
@@ -253,15 +254,15 @@ function resolveCity(cfg) {
   return { name: firstCity, code: code, found: code !== '100010000' || firstCity === '全国' };
 }
 
-function buildSearchUrl(cfg) {
+function buildSearchUrl(cfg, keyword) {
   const city = resolveCity(cfg);
   return 'https://www.zhipin.com/web/geek/jobs?' + new URLSearchParams({
-    query: cfg.keyword || '', city: city.code
+    query: keyword || cfg.keyword || '', city: city.code
   }).toString();
 }
 
-async function getSearchTab(cfg) {
-  const url = buildSearchUrl(cfg);
+async function getSearchTab(cfg, keyword) {
+  const url = buildSearchUrl(cfg, keyword);
   const tabs = await chrome.tabs.query({ url: '*://*.zhipin.com/web/geek/jobs*' });
   let tab = tabs[0];
   if (!tab) tab = await chrome.tabs.create({ url: url, active: true });
@@ -475,6 +476,58 @@ async function hydrateJobDetails(jobs, cfg) {
   return result;
 }
 
+async function collectAcrossSearchTerms(cfg, limit) {
+  const terms = SearchStrategy.resolveTerms({
+    keyword: cfg.keyword,
+    matchMode: cfg.searchMatchMode,
+    keywordExpansionEnabled: cfg.keywordExpansionEnabled
+  });
+  let collected = [];
+  let rawCards = 0;
+  const maximum = Math.max(1, Number(limit) || 20);
+  const maxRounds = Math.max(1, Math.ceil(maximum / 5));
+
+  log('搜索范围：' + terms.length + ' 个关键词，唯一岗位上限 ' + maximum);
+  for (let round = 1; round <= maxRounds && collected.length < maximum; round++) {
+    let roundAdded = 0;
+    for (let index = 0; index < terms.length && collected.length < maximum; index++) {
+      if (state.aborted) break;
+      await waitIfPaused();
+      const term = terms[index];
+      const remainingTerms = Math.max(1, terms.length - index);
+      const quota = Math.min(5, Math.max(1, Math.ceil((maximum - collected.length) / remainingTerms)));
+      try {
+        log('搜索岗位：' + term + '（第 ' + round + ' 轮）');
+        const tab = await getSearchTab(cfg, term);
+        await ensureInjected(tab.id, 'src/content-search.js');
+        const target = SearchStrategy.roundTarget(round, maximum);
+        const response = await sendToTab(tab.id, { type: 'SCRAPE', count: target });
+        if (!response || !response.success) {
+          throw new Error((response && response.error) || '岗位收集失败');
+        }
+        const jobs = (response.jobs || []).map(JobDetail.normalizeCollectedJob);
+        rawCards += jobs.length;
+        const known = new Set(collected.map(job => job.id));
+        const duplicates = jobs.filter(job => known.has(job.id));
+        const fresh = jobs.filter(job => !known.has(job.id)).slice(0, quota);
+        const before = collected.length;
+        collected = SearchStrategy.mergeJobs(collected, duplicates.concat(fresh), term, maximum);
+        roundAdded += collected.length - before;
+        progress(collected.length, maximum, '跨词收集');
+      } catch (error) {
+        throw new Error('搜索词“' + term + '”失败：' + error.message);
+      }
+    }
+    if (state.aborted || collected.length >= maximum) break;
+    if (roundAdded === 0) {
+      log('全部关键词本轮没有新增岗位，已停止继续翻页', 'warn');
+      break;
+    }
+  }
+  log('跨词收集完成：原始卡片 ' + rawCards + '，去重后 ' + collected.length, 'success');
+  return { jobs: collected, terms: terms, rawCards: rawCards };
+}
+
 async function runCollect() {
   state.aborted = false;
   state.paused = false;
@@ -494,17 +547,13 @@ async function runCollect() {
   catch (error) { return stopWithConfigError(error.message); }
 
   const city = resolveCity(cfg);
-  log('打开搜索页：' + cfg.keyword + ' | 城市：' + (city.found ? city.name : '全国'));
+  log('准备搜索：' + cfg.keyword + ' | 城市：' + (city.found ? city.name : '全国'));
   if (cfg.city && !city.found) log('城市“' + cfg.city + '”未识别，已按全国搜索', 'warn');
 
   try {
-    const tab = await getSearchTab(cfg);
     const count = parseInt(cfg.count, 10) || 20;
-    log('收集岗位中（目标 ' + count + ' 个）…');
-    await ensureInjected(tab.id, 'src/content-search.js');
-    const response = await sendToTab(tab.id, { type: 'SCRAPE', count: count });
-    if (!response || !response.success) throw new Error((response && response.error) || '岗位收集失败');
-    const collected = (response.jobs || []).map(JobDetail.normalizeCollectedJob);
+    const collection = await collectAcrossSearchTerms(cfg, count);
+    const collected = collection.jobs;
     log('收集到 ' + collected.length + ' 个岗位，开始读取完整详情', 'success');
     if (!collected.length) throw new Error('没有收集到岗位');
 
