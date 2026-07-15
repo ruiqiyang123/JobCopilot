@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>审核流程视觉测试</title>
+  <link rel="stylesheet" href="../../src/sidepanel.css">
+</head>
+<body>
+  <section class="card" id="reviewCard">
+    <div class="card-title"><span>④ 岗位审核</span><span>4 个待处理岗位</span></div>
+    <div class="review-tabs">
+      <button class="active">推荐 <span>2</span></button><button>待补充 <span>1</span></button>
+      <button>已批准 <span>1</span></button><button>不投递 <span>0</span></button>
+      <button>已排除 <span>0</span></button>
+    </div>
+    <div class="card-b review-body">
+      <div class="bulk-review-actions" id="bulkReviewActions">
+        <label><input type="checkbox" checked> 全选推荐岗位</label>
+        <button class="approve">一键批准推荐岗位（2）</button>
+      </div>
+      <article class="job-item">
+        <div class="job-head"><div class="job-title"><label class="job-select"><input type="checkbox" checked>选择</label><a>AI 产品经理</a></div><span class="preview-status">待审核</span></div>
+        <div class="job-meta">深圳示例科技 · 20–35K · 经验：1–3 年 · 规模：100–499 人 · 城市：深圳（按搜索条件推定）</div>
+        <div class="quick-status recommended"><div><strong>AI 快速判断：推荐</strong><span>JD 的 Agent 产品方向与候选人的项目和产品经历匹配。</span></div></div>
+        <div class="job-reason match">工作经验：1–3 年；城市：深圳；AI：方向匹配</div>
+        <div class="job-actions"><button class="approve">批准投递</button><button>生成详细评分</button><button class="reject">不投递</button></div>
+      </article>
+      <article class="job-item">
+        <div class="job-head"><div class="job-title"><a>AI Agent 产品经理</a></div><span class="preview-status">待补充</span></div>
+        <div class="job-meta">深圳另一科技 · 18–30K · 经验：1–3 年 · 规模：未知 · 城市：深圳（按搜索条件推定）</div>
+        <div class="quick-status running"><i class="quick-spinner"></i><div><strong>AI 快速判断中…</strong><span>信息已确认，可以继续审核其他岗位</span></div></div>
+        <div class="job-reason pending">信息缺失，已人工确认符合：公司规模</div>
+        <div class="job-actions"><button class="manual-confirmed" disabled>✓ 信息已确认</button><button disabled>详细评分中…</button><button class="reject">不投递</button></div>
+      </article>
+    </div>
+  </section>
+</body>
+</html>

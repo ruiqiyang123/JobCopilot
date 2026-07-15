@@ -113,6 +113,22 @@ input[type=file] { width: 100%; font-size: 11px; }
 .jd-summary { margin-top: 6px; color: #53636d; font-size: 11.5px; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .job-actions, .preview-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .job-actions .approve { border-color: #66b383; color: var(--green); }
+.job-actions .manual-confirmed { border-color: var(--green); background: var(--green); color: #fff; opacity: 1; }
+.job-select { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; color: var(--green); font-size: 10.5px; }
+.job-select input { width: auto; margin: 0; }
+.bulk-review-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; padding: 8px; border: 1px solid #b8dcc6; border-radius: 6px; background: #eef9f2; }
+.bulk-review-actions label { display: flex; align-items: center; gap: 5px; margin: 0; color: #267746; font-size: 11px; font-weight: 700; }
+.bulk-review-actions input { width: auto; margin: 0; }
+.bulk-review-actions button { border-color: #66b383; background: #fff; color: var(--green); font-weight: 700; }
+.bulk-review-actions button:disabled { opacity: .5; }
+.quick-status { display: flex; align-items: center; gap: 7px; margin-top: 7px; padding: 7px 8px; border-radius: 6px; font-size: 11px; }
+.quick-status.running, .quick-status.pending { background: #fff7e7; color: #985d08; }
+.quick-status.recommended { background: #edf8f1; color: #267746; }
+.quick-status.excluded, .quick-status.failed { background: #fff0f0; color: #a83838; }
+.quick-status strong { display: block; }
+.quick-status span { color: inherit; }
+.quick-spinner { width: 12px; height: 12px; flex: 0 0 auto; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: quick-spin .8s linear infinite; }
+@keyframes quick-spin { to { transform: rotate(360deg); } }
 .preview-actions .confirm { border-color: #c9d1d6; background: #eef1f3; color: #4b5962; }
 .preview-actions .confirm.confirmed { border-color: var(--green); background: var(--green); color: #fff; font-weight: 700; }
 .preview-actions .confirm.confirmed:disabled { opacity: 1; cursor: default; }

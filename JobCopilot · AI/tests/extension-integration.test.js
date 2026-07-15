@@ -308,7 +308,7 @@ test('稳定详情链接优先于搜索页卡片，并在详情页补全字段',
   assert.match(background, /createDetailTab\(job\.detailUrl, false\)/);
   assert.match(background, /READ_DETAIL/);
   assert.match(background, /JobDetail\.mergeDetail/);
-  assert.match(background, /AI 使用完整 JD 筛选中/);
+  assert.match(background, /AI 使用完整 JD 快速筛选中/);
   assert.match(contentSearch, /parseDetailPage/);
   assert.match(contentSearch, /JobDetail\.canonicalizeDetailUrl/);
   assert.ok(manifest.content_scripts[0].matches.includes('*://*.zhipin.com/job_detail/*'));
@@ -462,15 +462,18 @@ test('侧边栏可配置多关键词匹配模式和唯一岗位上限', () => {
   assert.match(sidepanelJs, /SearchStrategy\.resolveTerms/);
 });
 
-test('AI 筛选使用六维可解释评分并由后台校验和分类', () => {
+test('AI 自动筛选使用短结果，六维详细评分改为按需生成', () => {
   const background = read('src/background.js');
   const sidepanelHtml = read('src/sidepanel.html');
   const sidepanelJs = read('src/sidepanel.js');
 
   assert.match(background, /importScripts\([^)]*match-scoring\.js/);
   assert.match(background, /MatchScoring\.validate/);
+  assert.match(background, /MatchScoring\.validateQuick/);
+  assert.match(background, /GENERATE_DETAILED_SCORE/);
+  assert.match(background, /RETRY_QUICK_SCREENING/);
   assert.match(background, /MatchScoring\.toJobResult/);
-  assert.match(background, /MatchScoring\.pendingResult/);
+  assert.match(background, /MatchScoring\.quickPendingResult/);
   assert.match(background, /OVERRIDE_SCORE/);
   assert.ok(
     sidepanelHtml.indexOf('match-scoring.js') < sidepanelHtml.indexOf('sidepanel.js'),
@@ -480,6 +483,22 @@ test('AI 筛选使用六维可解释评分并由后台校验和分类', () => {
   assert.match(sidepanelJs, /matchScore/);
   assert.match(sidepanelJs, /matchDimensions/);
   assert.match(sidepanelJs, /data-action="override-score"/);
+  assert.match(sidepanelJs, /data-action="detailed-score"/);
+});
+
+test('人工确认使用异步快速判断，推荐岗位支持一次批量批准', () => {
+  const background = read('src/background.js');
+  const sidepanelHtml = read('src/sidepanel.html');
+  const sidepanelJs = read('src/sidepanel.js');
+
+  assert.match(background, /aiScreeningStatus:\s*'running'/);
+  assert.match(background, /BATCH_APPROVE/);
+  assert.match(background, /ReviewWorkflow\.approveMany/);
+  assert.match(sidepanelHtml, /id="bulkReviewActions"/);
+  assert.match(sidepanelHtml, /id="selectAllRecommended"/);
+  assert.match(sidepanelHtml, /id="btnBulkApprove"/);
+  assert.match(sidepanelJs, /BATCH_APPROVE/);
+  assert.match(sidepanelJs, /AI 快速判断中/);
 });
 
 test('侧边栏提供可命名筛选方案、旧配置迁移和条件摘要', () => {

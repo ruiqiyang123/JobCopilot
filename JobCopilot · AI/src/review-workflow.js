@@ -57,6 +57,30 @@
     return source;
   }
 
+  function isBulkApprovable(job) {
+    const source = normalizeJob(job);
+    const recommended = source.quickDecision === 'recommended'
+      || source.matchDecision === 'recommended';
+    return source.reviewStatus === 'pending_review'
+      && source.filterStatus === 'pass'
+      && source.match === true
+      && recommended
+      && source.deliveryStatus !== 'succeeded'
+      && source.aiScreeningStatus !== 'running';
+  }
+
+  function approveMany(jobs, jobIds, at) {
+    const requested = new Set(Array.isArray(jobIds) ? jobIds.map(String) : []);
+    const approvedIds = [];
+    const updatedAt = Number.isFinite(at) ? at : Date.now();
+    const updated = normalizeJobs(jobs).map(job => {
+      if (!requested.has(String(job.id)) || !isBulkApprovable(job)) return job;
+      approvedIds.push(job.id);
+      return setDecision(job, 'approved', updatedAt);
+    });
+    return { jobs: updated, approvedIds: approvedIds };
+  }
+
   function stableValue(value) {
     if (Array.isArray(value)) return value.map(stableValue);
     if (value && typeof value === 'object') {
@@ -223,6 +247,8 @@
     normalizeJobs: normalizeJobs,
     setDecision: setDecision,
     overrideScore: overrideScore,
+    isBulkApprovable: isBulkApprovable,
+    approveMany: approveMany,
     inputFingerprintParts: inputFingerprintParts,
     inputFingerprint: inputFingerprint,
     createPreview: createPreview,

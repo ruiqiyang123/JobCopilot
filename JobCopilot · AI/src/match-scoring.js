@@ -18,6 +18,10 @@
   const REVIEW_PRIORITY = Object.freeze({
     pending_review: 0, needs_info: 1, approved: 2, rejected: 3, filtered_out: 4
   });
+  const QUICK_DECISION_ALIASES = Object.freeze({
+    recommended: 'recommended', needs_info: 'needs_info', excluded: 'excluded',
+    推荐: 'recommended', 待确认: 'needs_info', 排除: 'excluded'
+  });
 
   function parse(raw) {
     if (raw && typeof raw === 'object') return raw;
@@ -84,6 +88,45 @@
     };
   }
 
+  function validateQuick(raw) {
+    const parsed = parse(raw);
+    const decision = QUICK_DECISION_ALIASES[String(parsed.decision || '').trim()];
+    if (!decision) throw new Error('快速筛选决策必须是推荐、待确认或排除');
+    const reason = String(parsed.reason || '').trim();
+    if (!reason) throw new Error('快速筛选缺少判断理由');
+    return {
+      decision: decision,
+      reason: reason,
+      match: decision === 'recommended'
+    };
+  }
+
+  function toQuickJobResult(result) {
+    const source = result || {};
+    return {
+      match: source.match === true,
+      matchDecision: source.decision,
+      quickDecision: source.decision,
+      quickReason: source.reason || '',
+      reason: source.reason || '',
+      aiScreeningStatus: 'succeeded',
+      aiScreeningError: ''
+    };
+  }
+
+  function quickPendingResult(error) {
+    const message = String(error || '模型结果不完整');
+    return {
+      match: false,
+      matchDecision: 'needs_info',
+      quickDecision: 'needs_info',
+      quickReason: '',
+      reason: 'AI 快速判断待确认：' + message,
+      aiScreeningStatus: 'failed',
+      aiScreeningError: message
+    };
+  }
+
   function toJobResult(result) {
     const source = result || {};
     return {
@@ -131,6 +174,9 @@
     parse: parse,
     decisionFor: decisionFor,
     validate: validate,
+    validateQuick: validateQuick,
+    toQuickJobResult: toQuickJobResult,
+    quickPendingResult: quickPendingResult,
     toJobResult: toJobResult,
     pendingResult: pendingResult,
     sortJobs: sortJobs

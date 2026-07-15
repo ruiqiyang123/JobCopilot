@@ -4,11 +4,13 @@ const SELECTORS = {
     jobCard: 'li.job-card-box, .job-card-wrapper',
     jobName: '.job-name, .job-title, [class*="job-name"]',
     jobSalary: '.job-salary, [class*="job-salary"]',
+    jobLocation: '.job-area, .job-location, .job-address, [class*="job-area"], [class*="job-location"]',
     tagList: '.tag-list li, .job-card-footer li, .company-tag-list li',
     company: '.company-name a, .company-name, .boss-info .company-name, .company-info .company-name, [class*="company-name"]',
     immediateChatBtn: 'a.op-btn-chat, button.op-btn-chat',
     detailName: '.job-banner .name h1, .job-banner .name, .job-title, h1',
     detailSalary: '.job-banner .salary, .job-banner .name .salary, .job-salary',
+    detailLocation: '.job-banner .job-address, .job-banner .job-location, .location-address, .job-address, [class*="job-location"]',
     detailCompany: '.company-info .company-name, .company-sider .company-name, .job-detail-company .company-name, .sider-company .company-name, .job-sider .sider-company .company-info a, .job-sider .company-info a',
     detailBody: '.job-sec-text, .job-detail-section, .job-detail-body, .job-detail-box .detail-content, .job-detail-box'
   },

@@ -48,12 +48,16 @@
     const detailUrl = canonicalizeDetailUrl(source.detailUrl || source.link || '', source.pageUrl);
     const stableId = extractJobId(detailUrl);
     const rawFacts = uniqueTexts([].concat(source.rawFacts || [], source.tags || []));
+    const rawLocationFacts = uniqueTexts([].concat(source.rawLocationFacts || []));
     const name = cleanText(source.name) || '未知岗位';
     const company = cleanText(source.company);
     const salary = cleanText(source.salary);
     const facts = JobFilters
       ? JobFilters.extractFacts(rawFacts.concat([name, salary]))
       : { experience: '', companySize: '' };
+    const location = JobFilters
+      ? JobFilters.extractLocationFacts(rawLocationFacts)
+      : { city: '', district: '', citySource: '', locationParseVersion: 0 };
     const fallbackId = cleanText(source.id) || [name, company, salary].join('|');
 
     return Object.assign({}, source, {
@@ -65,6 +69,7 @@
       salary: salary,
       tags: uniqueTexts(source.tags || []),
       rawFacts: rawFacts,
+      rawLocationFacts: rawLocationFacts,
       experience: source.experience || facts.experience || '',
       companySize: source.companySize || facts.companySize || '',
       employmentType: source.employmentType || facts.employmentType || '',
@@ -77,8 +82,11 @@
         || (facts.salaryRange && facts.salaryRange.maxK) || null,
       salaryMonths: source.salaryMonths || (source.salaryRange && source.salaryRange.months)
         || (facts.salaryRange && facts.salaryRange.months) || null,
-      city: source.city || facts.city || '',
-      district: source.district || facts.district || '',
+      city: source.city || location.city || '',
+      district: source.district || location.district || '',
+      citySource: source.citySource || location.citySource || '',
+      locationParseVersion: Number(source.locationParseVersion)
+        || location.locationParseVersion || 0,
       publishedDaysAgo: source.publishedDaysAgo === 0 || source.publishedDaysAgo
         ? Number(source.publishedDaysAgo) : facts.publishedDaysAgo,
       collectedAt: Number(source.collectedAt) || Date.now()
@@ -108,9 +116,14 @@
     const source = normalizeCollectedJob(sourceJob || {});
     const current = detail || {};
     const rawFacts = uniqueTexts([].concat(source.rawFacts || [], current.rawFacts || [], current.tags || []));
+    const rawLocationFacts = uniqueTexts([].concat(
+      source.rawLocationFacts || [], current.rawLocationFacts || []
+    ));
     const facts = JobFilters ? JobFilters.extractFacts(rawFacts.concat([
       current.name || source.name, current.salary || source.salary, current.jd || ''
     ])) : { experience: '', companySize: '' };
+    const location = JobFilters ? JobFilters.extractLocationFacts(rawLocationFacts)
+      : { city: '', district: '', citySource: '', locationParseVersion: 0 };
     return Object.assign({}, source, {
       id: source.id,
       detailUrl: source.detailUrl || canonicalizeDetailUrl(current.detailUrl || current.link),
@@ -120,6 +133,7 @@
       salary: cleanText(current.salary) || source.salary,
       tags: uniqueTexts([].concat(source.tags || [], current.tags || [])),
       rawFacts: rawFacts,
+      rawLocationFacts: rawLocationFacts,
       experience: current.experience || facts.experience || source.experience,
       companySize: current.companySize || facts.companySize || source.companySize,
       employmentType: current.employmentType || facts.employmentType || source.employmentType || '',
@@ -133,8 +147,11 @@
         || (facts.salaryRange && facts.salaryRange.maxK) || source.salaryMaxK || null,
       salaryMonths: current.salaryMonths || (current.salaryRange && current.salaryRange.months)
         || (facts.salaryRange && facts.salaryRange.months) || source.salaryMonths || null,
-      city: current.city || facts.city || source.city || '',
-      district: current.district || facts.district || source.district || '',
+      city: current.city || location.city || source.city || '',
+      district: current.district || location.district || source.district || '',
+      citySource: current.citySource || location.citySource || source.citySource || '',
+      locationParseVersion: Number(current.locationParseVersion)
+        || location.locationParseVersion || Number(source.locationParseVersion) || 0,
       publishedDaysAgo: current.publishedDaysAgo === 0 || current.publishedDaysAgo
         ? Number(current.publishedDaysAgo)
         : (facts.publishedDaysAgo === 0 || facts.publishedDaysAgo

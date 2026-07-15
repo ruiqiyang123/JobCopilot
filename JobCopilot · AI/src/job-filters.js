@@ -38,6 +38,14 @@
     Object.freeze({ value: 'doctorate', label: '博士' })
   ]);
 
+  const LOCATION_PARSE_VERSION = 2;
+  const KNOWN_CITIES = Object.freeze([
+    '北京', '上海', '广州', '深圳', '杭州', '成都', '武汉', '西安', '南京', '苏州',
+    '天津', '重庆', '长沙', '郑州', '沈阳', '青岛', '合肥', '厦门', '福州', '济南',
+    '宁波', '东莞', '无锡', '昆明', '哈尔滨', '长春', '大连', '石家庄', '珠海', '佛山'
+  ]);
+  const SPECIAL_DISTRICTS = Object.freeze(['大鹏新区', '浦东新区', '滨海新区', '两江新区']);
+
   const DEFAULT_CONFIG = Object.freeze({
     experienceEnabled: true,
     experienceValues: Object.freeze(['under_one', 'one_to_three']),
@@ -296,13 +304,99 @@
     };
   }
 
+  function cityPattern() {
+    return '(' + KNOWN_CITIES.slice().sort((left, right) => right.length - left.length).join('|') + ')';
+  }
+
+  function normalizeCityName(value) {
+    const compact = String(value || '').replace(/\s+/g, '').replace(/市$/, '');
+    return KNOWN_CITIES.indexOf(compact) >= 0 ? compact : '';
+  }
+
+  function validDistrict(value) {
+    const district = String(value || '').replace(/\s+/g, '');
+    if (SPECIAL_DISTRICTS.indexOf(district) >= 0) return district;
+    if (!/^[\u4e00-\u9fa5]{1,4}(?:区|县|市)$/.test(district)) return '';
+    if (/(?:社区|园区|区域|片区|校区|景区)$/.test(district)) return '';
+    return district;
+  }
+
+  function districtAfterCity(text, cityEnd) {
+    const remainder = text.slice(cityEnd).replace(/^[市：:·•/\\\s-]+/, '');
+    const match = remainder.match(/^([\u4e00-\u9fa5]{1,5}(?:区|县|市))/);
+    return match ? validDistrict(match[1]) : '';
+  }
+
+  function extractLocationFact(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return { city: '', district: '' };
+    const compact = raw.replace(/\s+/g, '');
+    const cities = cityPattern();
+    const contextual = compact.match(new RegExp('(?:工作地址|工作地点|办公地点|职位地点|所在城市|城市|地址|地点)[:：]?' + cities + '市?'));
+    const paired = compact.match(new RegExp(cities + '市?[·•/\\-]([\\u4e00-\\u9fa5]{1,5}(?:区|县|市))'));
+    let cityMatch = contextual || paired;
+    if (!cityMatch) {
+      const leading = compact.match(new RegExp('^' + cities + '市?'));
+      if (leading) {
+        const district = districtAfterCity(compact, leading[0].length);
+        if (compact === leading[0] || district) cityMatch = leading;
+      }
+    }
+    if (cityMatch) {
+      const city = normalizeCityName(cityMatch[1]);
+      const cityIndex = compact.indexOf(cityMatch[0]) + cityMatch[0].indexOf(cityMatch[1]);
+      const district = paired && paired[1] === city
+        ? validDistrict(paired[2])
+        : districtAfterCity(compact, cityIndex + cityMatch[1].length);
+      return { city: city, district: district };
+    }
+    const standalone = validDistrict(compact.replace(/^[·•：:]+|[·•：:]+$/g, ''));
+    return { city: '', district: standalone };
+  }
+
+  function extractLocationFacts(texts) {
+    const values = Array.isArray(texts) ? texts : [texts];
+    let city = '';
+    let district = '';
+    values.forEach(value => {
+      const location = extractLocationFact(value);
+      if (!city && location.city) city = location.city;
+      if (!district && location.district) district = location.district;
+    });
+    return {
+      city: city,
+      district: district,
+      citySource: city ? 'page' : '',
+      locationParseVersion: LOCATION_PARSE_VERSION
+    };
+  }
+
+  function applySearchCity(job, searchCity) {
+    const source = Object.assign({}, job || {});
+    const sourceKind = String(source.citySource || '');
+    const trusted = sourceKind === 'manual'
+      || (sourceKind === 'page' && Number(source.locationParseVersion) >= LOCATION_PARSE_VERSION);
+    if (trusted && normalizeCityName(source.city)) {
+      source.city = normalizeCityName(source.city);
+      source.district = validDistrict(source.district);
+      source.locationParseVersion = LOCATION_PARSE_VERSION;
+      return source;
+    }
+    const explicit = extractLocationFacts(source.rawLocationFacts || []);
+    if (explicit.city) {
+      return Object.assign(source, explicit);
+    }
+    const fallback = normalizeCityName(String(searchCity || '').split(/[\/、,，\s]+/)[0]);
+    source.city = fallback;
+    source.district = '';
+    source.citySource = fallback ? 'search' : '';
+    source.locationParseVersion = LOCATION_PARSE_VERSION;
+    return source;
+  }
+
   function locationFrom(text) {
-    const source = String(text || '').replace(/\s+/g, '');
-    const pair = source.match(/([\u4e00-\u9fa5]{2,10})[·•-]([\u4e00-\u9fa5]{1,8}(?:区|县|市))/);
-    if (pair) return { city: pair[1], district: pair[2] };
-    const district = source.match(/([\u4e00-\u9fa5]{1,8}(?:区|县))/);
-    const city = source.match(/(深圳|广州|北京|上海|杭州|成都|武汉|南京|苏州|东莞|珠海|佛山|长沙|西安|厦门|重庆|天津)/);
-    return { city: city ? city[1] : '', district: district ? district[1] : '' };
+    const location = extractLocationFacts(text);
+    return { city: location.city, district: location.district };
   }
 
   function publishedDaysAgoFrom(text) {
@@ -490,6 +584,9 @@
     splitTerms: splitTerms,
     normalizeCompany: normalizeCompany,
     extractFacts: extractFacts,
+    extractLocationFacts: extractLocationFacts,
+    applySearchCity: applySearchCity,
+    LOCATION_PARSE_VERSION: LOCATION_PARSE_VERSION,
     labelFor: labelFor,
     evaluate: evaluate,
     confirmPending: confirmPending

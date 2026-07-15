@@ -179,6 +179,10 @@
       <button data-review-tab="filtered_out">已排除 <span>0</span></button>
     </div>
     <div class="card-b review-body">
+      <div id="bulkReviewActions" class="bulk-review-actions hidden">
+        <label><input type="checkbox" id="selectAllRecommended"> 全选推荐岗位</label>
+        <button type="button" id="btnBulkApprove" class="approve">一键批准推荐岗位（0）</button>
+      </div>
       <div id="reviewList"><div class="empty">还没有筛选结果</div></div>
       <div class="sticky-action">
         <span id="approvedSummary">已批准 0 个</span>

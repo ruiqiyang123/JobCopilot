@@ -76,3 +76,31 @@ test('无效模型结果可转换成待确认岗位且不伪造分数', () => {
   assert.equal(fallback.matchScore, null);
   assert.match(fallback.reason, /格式无法解析/);
 });
+
+test('快速 AI 筛选接受短 JSON、代码块和中文决策', () => {
+  const recommended = MatchScoring.validateQuick({
+    decision: 'recommended', reason: 'JD 与 AI Agent 产品经历匹配。'
+  });
+  assert.equal(recommended.decision, 'recommended');
+  assert.equal(recommended.match, true);
+
+  const fenced = MatchScoring.validateQuick('```json\n{"decision":"待确认","reason":"年限需要确认"}\n```');
+  assert.equal(fenced.decision, 'needs_info');
+  assert.equal(fenced.match, false);
+  assert.throws(() => MatchScoring.validateQuick('{"decision":"maybe","reason":"x"}'), /决策/);
+});
+
+test('快速 AI 结果使用独立字段且失败时不默认排除', () => {
+  const result = MatchScoring.toQuickJobResult({
+    decision: 'excluded', reason: '岗位主要为销售。', match: false
+  });
+  assert.equal(result.quickDecision, 'excluded');
+  assert.equal(result.matchDecision, 'excluded');
+  assert.equal(result.aiScreeningStatus, 'succeeded');
+
+  const failed = MatchScoring.quickPendingResult('模型超时');
+  assert.equal(failed.quickDecision, 'needs_info');
+  assert.equal(failed.matchDecision, 'needs_info');
+  assert.equal(failed.aiScreeningStatus, 'failed');
+  assert.match(failed.aiScreeningError, /超时/);
+});

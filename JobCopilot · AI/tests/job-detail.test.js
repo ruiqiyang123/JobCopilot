@@ -80,7 +80,8 @@ test('岗位详情合并新增硬筛选事实且不丢失卡片信息', () => {
     name: 'AI 产品经理',
     company: '示例科技',
     salary: '15-25K·14薪',
-    rawFacts: ['深圳·南山区', '1-3年', '100-499人', '全职']
+    rawFacts: ['深圳·南山区', '1-3年', '100-499人', '全职'],
+    rawLocationFacts: ['深圳·南山区']
   }, {
     jd: '本科，职位发布于 2 天前，负责 RAG 与 Agent 产品。',
     rawFacts: ['本科', '2天前发布']
@@ -96,4 +97,24 @@ test('岗位详情合并新增硬筛选事实且不丢失卡片信息', () => {
   assert.equal(merged.city, '深圳');
   assert.equal(merged.district, '南山区');
   assert.equal(merged.publishedDaysAgo, 2);
+});
+
+test('岗位规范化只从独立位置事实读取城市，不扫描岗位名和 JD', () => {
+  const job = JobDetail.normalizeCollectedJob({
+    name: '深圳互联网证券产品经理',
+    company: '示例科技',
+    rawFacts: ['活动资讯社区', '1-3年'],
+    rawLocationFacts: []
+  });
+  assert.equal(job.city, '');
+  assert.equal(job.district, '');
+
+  const located = JobDetail.normalizeCollectedJob({
+    name: 'AI 产品经理',
+    rawFacts: ['1-3年'],
+    rawLocationFacts: ['工作地址深圳南山区']
+  });
+  assert.equal(located.city, '深圳');
+  assert.equal(located.district, '南山区');
+  assert.equal(located.citySource, 'page');
 });

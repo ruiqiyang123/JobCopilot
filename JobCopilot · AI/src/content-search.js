@@ -38,6 +38,9 @@
     const link = linkElement ? linkElement.href : '';
     const tags = Array.from(card.querySelectorAll(SELECTORS.jobs.tagList))
       .map(node => JobDetail.cleanText(node.textContent || '')).filter(Boolean);
+    const locationText = textOf(card, SELECTORS.jobs.jobLocation);
+    const rawLocationFacts = tags.concat(locationText ? [locationText] : []);
+    const location = JobFilters.extractLocationFacts(rawLocationFacts);
     const rawFacts = tags.concat([JobDetail.cleanText(card.innerText || '')]);
     const facts = JobFilters.extractFacts(rawFacts);
     return JobDetail.normalizeCollectedJob({
@@ -46,10 +49,15 @@
       company: textOf(card, SELECTORS.jobs.company),
       tags: tags,
       rawFacts: rawFacts,
+      rawLocationFacts: rawLocationFacts,
       link: link,
       pageUrl: location.href,
       experience: facts.experience,
       companySize: facts.companySize,
+      city: location.city,
+      district: location.district,
+      citySource: location.citySource,
+      locationParseVersion: location.locationParseVersion,
       manualOverride: false
     });
   }
@@ -111,6 +119,8 @@
       textOf(document, '.job-banner, .job-primary, .job-detail-header'),
       textOf(document, '.company-info, .company-sider, .sider-company')
     ].filter(Boolean);
+    const rawLocationFacts = [textOf(document, SELECTORS.jobs.detailLocation)].filter(Boolean);
+    const location = JobFilters.extractLocationFacts(rawLocationFacts);
     const facts = JobFilters.extractFacts(rawFacts);
     const currentJob = JobDetail.normalizeCollectedJob({
       id: JobDetail.extractJobId(detailUrl),
@@ -119,8 +129,13 @@
       salary: textOf(document, SELECTORS.jobs.detailSalary),
       company: textOf(document, SELECTORS.jobs.detailCompany),
       rawFacts: rawFacts,
+      rawLocationFacts: rawLocationFacts,
       experience: facts.experience,
-      companySize: facts.companySize
+      companySize: facts.companySize,
+      city: location.city,
+      district: location.district,
+      citySource: location.citySource,
+      locationParseVersion: location.locationParseVersion
     });
     return {
       success: true,

@@ -20,6 +20,8 @@ const confirmingPreviewIds = new Set();
 const regeneratingPreviewIds = new Set();
 const previewActionErrors = {};
 const previewDraftTimers = {};
+const deselectedRecommendedIds = new Set();
+let bulkApproving = false;
 
 function esc(value) {
   return String(value || '').replace(/[&<>"]/g, character => ({
@@ -631,6 +633,9 @@ function jobFactsText(job) {
   ];
   if (job.employmentType) facts.push('类型：' + JobFilters.labelFor('employmentType', job.employmentType));
   if (job.education) facts.push('学历：' + JobFilters.labelFor('education', job.education));
+  if (job.city) {
+    facts.push('城市：' + job.city + (job.citySource === 'search' ? '（按搜索条件推定）' : ''));
+  }
   if (job.district) facts.push('区域：' + job.district);
   if (job.publishedDaysAgo === 0) facts.push('当天发布');
   else if (job.publishedDaysAgo) facts.push(job.publishedDaysAgo + ' 天前发布');
@@ -648,12 +653,24 @@ function matchDecisionLabel(decision) {
 }
 
 function renderScoreDetails(job) {
+  const quickDecision = job.quickDecision || job.matchDecision;
+  let quickStatus = '';
+  if (job.aiScreeningStatus === 'running') {
+    quickStatus = '<div class="quick-status running"><i class="quick-spinner"></i><div><strong>AI 快速判断中…</strong>'
+      + '<span>信息已确认，可以继续审核其他岗位</span></div></div>';
+  } else if (job.aiScreeningStatus === 'failed') {
+    quickStatus = '<div class="quick-status failed"><div><strong>AI 快速判断失败</strong><span>'
+      + esc(job.aiScreeningError || '可以点击重新快速判断') + '</span></div></div>';
+  } else if (quickDecision) {
+    const quickClass = quickDecision === 'recommended'
+      ? 'recommended' : (quickDecision === 'excluded' ? 'excluded' : 'pending');
+    quickStatus = '<div class="quick-status ' + quickClass + '"><div><strong>AI 快速判断：'
+      + esc(matchDecisionLabel(quickDecision)) + '</strong><span>'
+      + esc(job.quickReason || job.reason || '') + '</span></div></div>';
+  }
   const hasScore = job.matchScore !== null && job.matchScore !== undefined
     && Number.isFinite(Number(job.matchScore));
-  if (!hasScore) {
-    return job.matchDecision === 'needs_info'
-      ? '<div class="score-overview pending"><strong>AI 评分待确认</strong></div>' : '';
-  }
+  if (!hasScore) return quickStatus;
   const dimensions = job.matchDimensions || {};
   const ranked = MatchScoring.DIMENSIONS.map(definition => ({
     key: definition.key,
@@ -681,7 +698,7 @@ function renderScoreDetails(job) {
       + job.matchRisks.map(item => '<li>' + esc(item) + '</li>').join('') + '</ul></div>' : '';
   const decisionClass = job.matchDecision === 'recommended'
     ? 'recommended' : (job.matchDecision === 'excluded' ? 'excluded' : 'pending');
-  return '<div class="score-overview ' + decisionClass + '"><span class="score-badge">'
+  return quickStatus + '<div class="score-overview ' + decisionClass + '"><span class="score-badge">'
     + esc(job.matchScore) + '</span><div><strong>' + esc(matchDecisionLabel(job.matchDecision))
     + (job.scoreOverride ? ' · 已人工覆盖' : '') + '</strong><small>' + esc(highlights) + '</small></div></div>'
     + '<details class="score-details"><summary>查看评分详情</summary>' + rows + strengths + risks + '</details>';
@@ -692,11 +709,20 @@ function renderReviewCard(job) {
   const title = link
     ? '<a href="' + esc(link) + '" target="_blank" rel="noreferrer">' + esc(job.name) + '</a>'
     : esc(job.name);
+  const selectable = ReviewWorkflow.isBulkApprovable(job);
+  const selection = selectable
+    ? '<label class="job-select"><input type="checkbox" data-review-select="' + esc(job.id) + '"'
+      + (deselectedRecommendedIds.has(job.id) ? '' : ' checked') + '>选择</label>' : '';
   let actions = '';
   if (link) actions += '<a class="icon-btn" href="' + esc(link) + '" target="_blank" rel="noreferrer">查看完整岗位</a>';
   if (job.reviewStatus === 'needs_info') {
     if (job.filterStatus === 'pending') {
       actions += '<button data-action="confirm-filter" data-id="' + esc(job.id) + '">确认信息符合</button>';
+    } else if (job.aiScreeningStatus === 'running') {
+      actions += '<button class="manual-confirmed" disabled>✓ 信息已确认</button>';
+    } else if (job.aiScreeningStatus === 'failed') {
+      actions += '<button class="manual-confirmed" disabled>✓ 信息已确认</button>';
+      actions += '<button data-action="retry-quick" data-id="' + esc(job.id) + '">重新快速判断</button>';
     } else if (job.filterStatus === 'pass' && job.matchDecision === 'needs_info') {
       actions += '<button class="approve" data-action="override-score" data-id="' + esc(job.id) + '">人工加入候选</button>';
     }
@@ -714,19 +740,30 @@ function renderReviewCard(job) {
       && job.matchDecision === 'excluded') {
     actions += '<button class="approve" data-action="override-score" data-id="' + esc(job.id) + '">人工加入候选</button>';
   }
+  if (job.filterStatus === 'pass') {
+    if (job.detailedScoreStatus === 'running') {
+      actions += '<button disabled>详细评分中…</button>';
+    } else {
+      actions += '<button data-action="detailed-score" data-id="' + esc(job.id) + '">'
+        + (job.matchScore === null || job.matchScore === undefined ? '生成详细评分' : '重新生成详细评分')
+        + '</button>';
+    }
+  }
   const reason = job.reason || (job.filterReasons || []).join('；') || '等待审核';
   const jd = String(job.jd || '').trim();
   const detailError = job.detailError ? '<div class="job-reason pending">详情读取：' + esc(job.detailError) + '</div>' : '';
   const deliveryError = job.deliveryStatus === 'failed'
     ? '<div class="job-reason skip">上次投递失败：' + esc(job.deliveryError || '未知错误') + '</div>' : '';
+  const detailedError = job.detailedScoreStatus === 'failed'
+    ? '<div class="job-reason skip">详细评分：' + esc(job.detailedScoreError || '生成失败') + '</div>' : '';
   const statusText = job.deliveryStatus === 'failed'
     ? '投递失败' : (job.deliveryStatus === 'not_run' ? '未执行' : reviewStatusLabel(job.reviewStatus));
-  return '<article class="job-item"><div class="job-head"><div class="job-title">' + title + '</div>'
+  return '<article class="job-item"><div class="job-head"><div class="job-title">' + selection + title + '</div>'
     + '<span class="preview-status' + (job.deliveryStatus === 'failed' ? ' failed' : '') + '">' + esc(statusText) + '</span></div>'
     + '<div class="job-meta">' + esc(jobFactsText(job)) + '</div>'
     + renderScoreDetails(job)
     + '<div class="job-reason ' + reasonClass(job) + '">' + esc(reason) + '</div>'
-    + detailError + deliveryError
+    + detailError + deliveryError + detailedError
     + (jd ? '<div class="jd-summary">' + esc(jd) + '</div>' : '')
     + '<div class="job-actions">' + actions + '</div></article>';
 }
@@ -750,9 +787,35 @@ function renderReview() {
   const visible = MatchScoring.sortJobs(activeJobs()).filter(job => job.reviewStatus === currentReviewTab);
   $('reviewList').innerHTML = visible.map(renderReviewCard).join('')
     || '<div class="empty">当前分类没有岗位</div>';
+  renderBulkReviewActions();
   $('approvedSummary').textContent = '已批准 ' + counts.approved + ' 个';
   renderPreviewButton(counts.approved);
   renderPreviews();
+}
+
+function recommendedForBulk() {
+  return activeJobs().filter(job => ReviewWorkflow.isBulkApprovable(job));
+}
+
+function selectedRecommendedIds() {
+  return recommendedForBulk().filter(job => !deselectedRecommendedIds.has(job.id)).map(job => job.id);
+}
+
+function renderBulkReviewActions() {
+  const jobs = recommendedForBulk();
+  const eligibleIds = new Set(jobs.map(job => job.id));
+  Array.from(deselectedRecommendedIds).forEach(id => {
+    if (!eligibleIds.has(id)) deselectedRecommendedIds.delete(id);
+  });
+  const selected = selectedRecommendedIds();
+  const visible = currentReviewTab === 'pending_review' && jobs.length > 0;
+  $('bulkReviewActions').classList.toggle('hidden', !visible);
+  $('selectAllRecommended').checked = jobs.length > 0 && selected.length === jobs.length;
+  $('selectAllRecommended').indeterminate = selected.length > 0 && selected.length < jobs.length;
+  $('selectAllRecommended').disabled = bulkApproving;
+  $('btnBulkApprove').disabled = bulkApproving || selected.length === 0;
+  $('btnBulkApprove').textContent = bulkApproving
+    ? '批量批准中…' : '一键批准推荐岗位（' + selected.length + '）';
 }
 
 $('reviewTabs').addEventListener('click', event => {
@@ -771,6 +834,10 @@ $('reviewList').addEventListener('click', async event => {
     let response;
     if (button.dataset.action === 'confirm-filter') {
       response = await runtimeMessage({ type: 'CONFIRM_FILTER_PENDING', jobId: jobId });
+    } else if (button.dataset.action === 'retry-quick') {
+      response = await runtimeMessage({ type: 'RETRY_QUICK_SCREENING', jobId: jobId });
+    } else if (button.dataset.action === 'detailed-score') {
+      response = await runtimeMessage({ type: 'GENERATE_DETAILED_SCORE', jobId: jobId });
     } else if (button.dataset.action === 'override-score') {
       response = await runtimeMessage({ type: 'OVERRIDE_SCORE', jobId: jobId });
     } else {
@@ -786,6 +853,41 @@ $('reviewList').addEventListener('click', async event => {
   } catch (error) {
     addLog(error.message, 'error');
     button.disabled = false;
+  }
+});
+
+$('reviewList').addEventListener('change', event => {
+  const input = event.target.closest('[data-review-select]');
+  if (!input) return;
+  if (input.checked) deselectedRecommendedIds.delete(input.dataset.reviewSelect);
+  else deselectedRecommendedIds.add(input.dataset.reviewSelect);
+  renderBulkReviewActions();
+});
+
+$('selectAllRecommended').addEventListener('change', event => {
+  recommendedForBulk().forEach(job => {
+    if (event.target.checked) deselectedRecommendedIds.delete(job.id);
+    else deselectedRecommendedIds.add(job.id);
+  });
+  renderReview();
+});
+
+$('btnBulkApprove').addEventListener('click', async () => {
+  const ids = selectedRecommendedIds();
+  if (!ids.length || bulkApproving) return;
+  bulkApproving = true;
+  renderBulkReviewActions();
+  try {
+    const response = await runtimeMessage({ type: 'BATCH_APPROVE', jobIds: ids });
+    if (!response.ok) throw new Error(response.error || '批量批准失败');
+    currentScreened = response.result.screened || currentScreened;
+    (response.result.approvedIds || []).forEach(id => deselectedRecommendedIds.delete(id));
+    addLog('已批量批准 ' + (response.result.approvedIds || []).length + ' 个推荐岗位', 'success');
+  } catch (error) {
+    addLog(error.message, 'error');
+  } finally {
+    bulkApproving = false;
+    renderReview();
   }
 });
 

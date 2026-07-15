@@ -20,6 +20,8 @@ let state = {
   previews: {}, lastBatch: null, trackerRecords: [],
   greetingPlansState: null
 };
+const quickScreeningTasks = new Set();
+const detailedScoringTasks = new Set();
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -73,7 +75,8 @@ function jobInfo(job) {
 }
 
 function hardFilterJob(job, cfg) {
-  return Object.assign({}, job, JobFilters.evaluate(job, cfg.jobFilterConfig));
+  const located = JobFilters.applySearchCity(job, cfg.city);
+  return Object.assign({}, located, JobFilters.evaluate(located, cfg.jobFilterConfig));
 }
 
 function blockedScreenResult(job) {
@@ -144,6 +147,22 @@ async function callLLM(cfg, messages, options) {
 }
 
 async function screenJob(cfg, job) {
+  const system = '你是 AI 产品岗位招聘筛选助手。只能依据求职者简历与完整 JD，禁止虚构。'
+    + '只判断是否值得进入人工审核，输出极简 JSON，不要 Markdown：'
+    + '{"decision":"recommended|needs_info|excluded","reason":"一句话理由"}。'
+    + 'recommended 表示方向和主要证据匹配；needs_info 表示证据不足或需要人工判断；'
+    + 'excluded 表示方向或核心要求明确不匹配。';
+  const user = '求职者简历：\n' + resumeFull(cfg)
+    + '\n\n待筛选岗位：\n' + jobInfo(job)
+    + '\n\n只输出 decision 和 reason。';
+  const raw = await callLLM(cfg, [
+    { role: 'system', content: system },
+    { role: 'user', content: user }
+  ], { maxTokens: 180, temperature: 0.1, jsonMode: true, timeoutMs: 20000 });
+  return MatchScoring.toQuickJobResult(MatchScoring.validateQuick(raw));
+}
+
+async function scoreJobDetailed(cfg, job) {
   const system = '你是资深 AI 产品招聘经理。只能依据求职者简历事实与岗位完整 JD 评分，禁止虚构。'
     + '按六个维度评分：岗位方向 30、工作年限 15、产品基本功 20、AI 经历 20、学历背景 5、行业/领域经验 10。'
     + '每个 evidence 必须明确引用 JD 或简历中的真实证据；总分必须严格等于六个分项之和。'
@@ -162,11 +181,7 @@ async function screenJob(cfg, job) {
     { role: 'system', content: system },
     { role: 'user', content: user }
   ], { maxTokens: 1100, temperature: 0.2, jsonMode: true });
-  try {
-    return MatchScoring.toJobResult(MatchScoring.validate(raw, cfg.searchMatchMode || 'balanced'));
-  } catch (error) {
-    return MatchScoring.pendingResult(error.message || '模型评分格式无法解析');
-  }
+  return MatchScoring.toJobResult(MatchScoring.validate(raw, cfg.searchMatchMode || 'balanced'));
 }
 
 async function generateAiOpening(cfg, plan, job, jd) {
@@ -445,9 +460,45 @@ async function hydrateReviewState() {
     });
   }
   if (saved.processed) state.processed = saved.processed;
+  const cfg = await getCfg();
+  state.jobs = state.jobs.map(job => migrateReviewJob(job, cfg));
+  state.screened = state.screened.map(job => migrateReviewJob(job, cfg));
   migrateDeliveryState();
   await persistReviewState();
   if (saved.resumeImage) await chrome.storage.local.remove('resumeImage');
+}
+
+function migrateReviewJob(job, cfg) {
+  const source = Object.assign({}, job || {});
+  const legacyLocation = Number(source.locationParseVersion) < JobFilters.LOCATION_PARSE_VERSION;
+  const located = JobFilters.applySearchCity(source, cfg.city);
+  let migrated = Object.assign({}, located, JobFilters.evaluate(located, cfg.jobFilterConfig));
+  const oldFilterReasons = Array.isArray(source.filterReasons) ? source.filterReasons : [];
+  if (legacyLocation && oldFilterReasons.some(reason => /城市|行政区/.test(reason))) {
+    migrated = Object.assign({}, migrated, {
+      match: false,
+      matchDecision: 'needs_info',
+      quickDecision: 'needs_info',
+      quickReason: '',
+      aiScreeningStatus: 'failed',
+      aiScreeningError: '位置识别规则已更新，请重新快速判断',
+      reviewStatus: '',
+      reason: (migrated.filterReasons || []).join('；') + '；AI：位置修复后请重新快速判断'
+    });
+  }
+  if (migrated.aiScreeningStatus === 'running' && !quickScreeningTasks.has(migrated.id)) {
+    migrated.aiScreeningStatus = 'failed';
+    migrated.aiScreeningError = '上次快速判断未完成，请重试';
+    migrated.match = false;
+    migrated.matchDecision = 'needs_info';
+    migrated.quickDecision = 'needs_info';
+    migrated.reviewStatus = '';
+  }
+  if (migrated.detailedScoreStatus === 'running' && !detailedScoringTasks.has(migrated.id)) {
+    migrated.detailedScoreStatus = 'failed';
+    migrated.detailedScoreError = '上次详细评分未完成，请重试';
+  }
+  return ReviewWorkflow.normalizeJob(migrated);
 }
 
 function syncJob(job) {
@@ -580,7 +631,7 @@ async function runCollect() {
     log('硬筛选：通过 ' + eligible.length + '，排除 '
       + blocked.filter(job => job.filterStatus === 'fail').length + '，待补充 '
       + blocked.filter(job => job.filterStatus === 'pending').length);
-    log('AI 使用完整 JD 筛选中（' + providerNameFrom(cfg) + '）…');
+    log('AI 使用完整 JD 快速筛选中（' + providerNameFrom(cfg) + '）…');
 
     let completed = blocked.length;
     progress(completed, state.jobs.length, 'AI 筛选');
@@ -595,7 +646,7 @@ async function runCollect() {
           return ReviewWorkflow.normalizeJob(Object.assign({}, job, result));
         } catch (error) {
           return ReviewWorkflow.normalizeJob(Object.assign(
-            {}, job, MatchScoring.pendingResult('模型调用异常：' + error.message)
+            {}, job, MatchScoring.quickPendingResult('模型调用异常：' + error.message)
           ));
         }
       }));
@@ -638,15 +689,149 @@ async function confirmFilterPending(jobId) {
   const job = findJob(jobId);
   if (!job) throw new Error('找不到待补充岗位');
   const confirmed = JobFilters.confirmPending(job, cfg.jobFilterConfig);
-  const aiResult = await screenJob(cfg, confirmed);
-  const updated = syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, confirmed, aiResult, {
-    reviewStatus: '',
+  const updated = syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, confirmed, {
+    match: false,
+    matchDecision: 'needs_info',
+    quickDecision: 'needs_info',
+    quickReason: '',
+    aiScreeningStatus: 'running',
+    aiScreeningError: '',
+    reviewStatus: 'needs_info',
     reviewUpdatedAt: Date.now(),
-    reason: (confirmed.filterReasons || []).join('；') + '；AI：' + aiResult.reason
+    reason: (confirmed.filterReasons || []).join('；') + '；AI：快速判断中…'
   })));
   await persistReviewState();
-  chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
+  broadcastScreened();
+  runQuickScreeningForJob(jobId, cfg).catch(() => {});
   return { screened: state.screened, job: updated };
+}
+
+function broadcastScreened() {
+  chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
+}
+
+async function runQuickScreeningForJob(jobId, cfg) {
+  quickScreeningTasks.add(jobId);
+  const job = findJob(jobId);
+  if (!job) {
+    quickScreeningTasks.delete(jobId);
+    throw new Error('找不到待判断岗位');
+  }
+  try {
+    const result = await screenJob(cfg, job);
+    const latest = findJob(jobId) || job;
+    syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, result, {
+      reviewStatus: '',
+      reviewUpdatedAt: Date.now(),
+      reason: (latest.filterReasons || []).join('；') + '；AI：' + result.reason
+    })));
+  } catch (error) {
+    const latest = findJob(jobId) || job;
+    const failed = MatchScoring.quickPendingResult(error.message || '快速判断失败');
+    syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, failed, {
+      reviewStatus: '',
+      reviewUpdatedAt: Date.now(),
+      reason: (latest.filterReasons || []).join('；') + '；AI：' + failed.reason
+    })));
+  }
+  try {
+    await persistReviewState();
+    broadcastScreened();
+  } finally {
+    quickScreeningTasks.delete(jobId);
+  }
+}
+
+async function retryQuickScreening(jobId) {
+  await hydrateReviewState();
+  const cfg = await getCfg();
+  const job = findJob(jobId);
+  if (!job || job.filterStatus !== 'pass') throw new Error('岗位硬筛选尚未通过');
+  if (job.aiScreeningStatus === 'running') throw new Error('该岗位正在快速判断');
+  const updated = syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, job, {
+    match: false,
+    matchDecision: 'needs_info',
+    quickDecision: 'needs_info',
+    quickReason: '',
+    aiScreeningStatus: 'running',
+    aiScreeningError: '',
+    reviewStatus: 'needs_info',
+    reviewUpdatedAt: Date.now(),
+    reason: (job.filterReasons || []).join('；') + '；AI：快速判断中…'
+  })));
+  await persistReviewState();
+  broadcastScreened();
+  runQuickScreeningForJob(jobId, cfg).catch(() => {});
+  return { screened: state.screened, job: updated };
+}
+
+async function runDetailedScoreForJob(jobId, cfg) {
+  detailedScoringTasks.add(jobId);
+  const job = findJob(jobId);
+  if (!job) {
+    detailedScoringTasks.delete(jobId);
+    throw new Error('找不到待评分岗位');
+  }
+  try {
+    const detailed = await scoreJobDetailed(cfg, job);
+    const latest = findJob(jobId) || job;
+    syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, {
+      matchScore: detailed.matchScore,
+      matchDimensions: detailed.matchDimensions,
+      matchStrengths: detailed.matchStrengths,
+      matchRisks: detailed.matchRisks,
+      detailedScore: {
+        score: detailed.matchScore,
+        dimensions: detailed.matchDimensions,
+        strengths: detailed.matchStrengths,
+        risks: detailed.matchRisks,
+        reason: detailed.reason
+      },
+      detailedScoreStatus: 'succeeded',
+      detailedScoreError: ''
+    })));
+  } catch (error) {
+    const latest = findJob(jobId) || job;
+    syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, {
+      detailedScoreStatus: 'failed',
+      detailedScoreError: error.message || '详细评分失败'
+    })));
+  }
+  try {
+    await persistReviewState();
+    broadcastScreened();
+  } finally {
+    detailedScoringTasks.delete(jobId);
+  }
+}
+
+async function generateDetailedScore(jobId) {
+  await hydrateReviewState();
+  const cfg = await getCfg();
+  const job = findJob(jobId);
+  if (!job || job.filterStatus !== 'pass') throw new Error('岗位硬筛选尚未通过');
+  if (job.detailedScoreStatus === 'running') throw new Error('该岗位正在生成详细评分');
+  const updated = syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, job, {
+    detailedScoreStatus: 'running', detailedScoreError: ''
+  })));
+  await persistReviewState();
+  broadcastScreened();
+  runDetailedScoreForJob(jobId, cfg).catch(() => {});
+  return { screened: state.screened, job: updated };
+}
+
+async function batchApprove(jobIds) {
+  await hydrateReviewState();
+  const result = ReviewWorkflow.approveMany(state.screened, jobIds, Date.now());
+  if (!result.approvedIds.length) throw new Error('没有可批量批准的推荐岗位');
+  state.screened = result.jobs;
+  state.screened.forEach(job => {
+    const index = state.jobs.findIndex(item => item.id === job.id);
+    if (index >= 0) state.jobs[index] = job;
+  });
+  await persistReviewState();
+  broadcastScreened();
+  return { screened: state.screened, approvedIds: result.approvedIds };
 }
 
 async function overrideScoreDecision(jobId) {
@@ -1151,6 +1336,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     confirmFilterPending(message.jobId)
       .then(result => sendResponse({ ok: true, result: result }))
       .catch(error => sendResponse({ ok: false, error: error.message || '人工确认失败' }));
+    return true;
+  }
+  if (message.type === 'RETRY_QUICK_SCREENING') {
+    retryQuickScreening(message.jobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '快速判断启动失败' }));
+    return true;
+  }
+  if (message.type === 'GENERATE_DETAILED_SCORE') {
+    generateDetailedScore(message.jobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '详细评分启动失败' }));
+    return true;
+  }
+  if (message.type === 'BATCH_APPROVE') {
+    batchApprove(message.jobIds)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '批量批准失败' }));
     return true;
   }
   if (message.type === 'SET_REVIEW_DECISION') {

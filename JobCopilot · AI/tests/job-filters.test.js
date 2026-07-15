@@ -160,6 +160,46 @@ test('解析岗位类型、学历、薪资、行政区和发布时间', () => {
   assert.equal(JobFilters.extractFacts('本科及以上，硕士优先').education, 'bachelor');
 });
 
+test('可信位置解析不会把岗位标题或 JD 中的社区当作位置', () => {
+  const polluted = JobFilters.extractLocationFacts([
+    'AI产品经理（深圳互联网证券产品经理）',
+    '负责活动资讯社区、用户增长区域和业务园区建设'
+  ]);
+  assert.equal(polluted.city, '');
+  assert.equal(polluted.district, '');
+
+  const explicit = JobFilters.extractLocationFacts(['工作地址：深圳·南山区']);
+  assert.equal(explicit.city, '深圳');
+  assert.equal(explicit.district, '南山区');
+  assert.equal(explicit.citySource, 'page');
+});
+
+test('城市缺失时使用搜索城市兜底，页面明确异地时不覆盖', () => {
+  const inferred = JobFilters.applySearchCity({
+    id: 'missing-location',
+    city: '圳互联网证券产品经理',
+    district: '活动资讯社区',
+    locationParseVersion: 1
+  }, '深圳');
+  assert.equal(inferred.city, '深圳');
+  assert.equal(inferred.citySource, 'search');
+  assert.equal(inferred.district, '');
+  assert.equal(inferred.locationParseVersion, 2);
+  const cityOnly = Object.assign(JobFilters.getDefaultConfig(), {
+    city: '深圳', experienceEnabled: false, companySizeEnabled: false,
+    employmentTypeEnabled: false, educationEnabled: false, publishedTimeEnabled: false
+  });
+  assert.equal(JobFilters.evaluate(inferred, cityOnly).filterStatus, 'pass');
+
+  const explicit = JobFilters.applySearchCity({
+    city: '广州', district: '天河区', citySource: 'page', locationParseVersion: 2
+  }, '深圳');
+  assert.equal(explicit.city, '广州');
+  assert.equal(explicit.citySource, 'page');
+  assert.equal(explicit.district, '天河区');
+  assert.equal(JobFilters.evaluate(explicit, cityOnly).filterStatus, 'fail');
+});
+
 test('薪资使用岗位月薪范围求交集，不折算薪数', () => {
   const config = Object.assign(JobFilters.getDefaultConfig(), {
     employmentTypeEnabled: false,
