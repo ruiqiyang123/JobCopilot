@@ -169,7 +169,7 @@
     </div>
   </section>
 
-  <section class="card" id="reviewCard">
+  <section class="card fixed-list-card" id="reviewCard">
     <div class="card-title"><span>④ 岗位审核</span><span id="reviewCount">0 个岗位</span></div>
     <div class="review-tabs" id="reviewTabs">
       <button data-review-tab="pending_review" class="active">推荐 <span>0</span></button>
@@ -178,44 +178,54 @@
       <button data-review-tab="rejected">不投递 <span>0</span></button>
       <button data-review-tab="filtered_out">已排除 <span>0</span></button>
     </div>
-    <div class="card-b review-body">
-      <div id="bulkCandidateActions" class="bulk-review-actions hidden">
-        <label><input type="checkbox" id="selectAllCandidates"> 全选待补充岗位</label>
-        <button type="button" id="btnBulkConfirmCandidates" class="approve">一键确认符合（0）</button>
+    <div class="card-b review-body fixed-list-body">
+      <div class="fixed-list-controls">
+        <div id="bulkCandidateActions" class="bulk-review-actions hidden">
+          <label><input type="checkbox" id="selectAllCandidates"> 全选待补充岗位</label>
+          <button type="button" id="btnBulkConfirmCandidates" class="approve">一键确认符合（0）</button>
+        </div>
+        <div id="bulkReviewActions" class="bulk-review-actions hidden">
+          <label><input type="checkbox" id="selectAllRecommended"> 全选推荐岗位</label>
+          <button type="button" id="btnBulkApprove" class="approve">一键批准推荐岗位（0）</button>
+        </div>
       </div>
-      <div id="bulkReviewActions" class="bulk-review-actions hidden">
-        <label><input type="checkbox" id="selectAllRecommended"> 全选推荐岗位</label>
-        <button type="button" id="btnBulkApprove" class="approve">一键批准推荐岗位（0）</button>
+      <div id="reviewList" class="fixed-list-scroll" tabindex="0" aria-label="岗位审核列表">
+        <div class="empty">还没有筛选结果</div>
       </div>
-      <div id="reviewList"><div class="empty">还没有筛选结果</div></div>
-      <div class="sticky-action">
+      <div class="sticky-action fixed-list-footer">
         <span id="approvedSummary">已批准 0 个</span>
         <button class="btn-go compact" id="btnPreview" disabled>预演已批准岗位</button>
       </div>
     </div>
   </section>
 
-  <section class="card" id="previewCard">
+  <section class="card fixed-list-card" id="previewCard">
     <div class="card-title"><span>⑤ 投递预演</span><span id="previewSummary">0 个已确认</span></div>
-    <div class="card-b">
-      <div class="safety-note">预演只生成最终内容；确认后才可进入正式投递。</div>
-      <div id="previewRunError" class="preview-run-error hidden" role="alert" aria-live="assertive"></div>
-      <button type="button" class="btn-secondary hidden" id="btnRetryPreviewFailures">仅重试预演失败岗位</button>
-      <div id="bulkPreviewActions" class="bulk-review-actions bulk-preview-actions hidden">
-        <label><input type="checkbox" id="selectAllPreviews"> 全选待确认预演</label>
-        <button type="button" id="btnBulkConfirmPreviews" class="approve">一键确认预演（0）</button>
+    <div class="card-b fixed-list-body">
+      <div class="fixed-list-controls">
+        <div class="safety-note">预演只生成最终内容；确认后才可进入正式投递。</div>
+        <div id="previewRunError" class="preview-run-error hidden" role="alert" aria-live="assertive"></div>
+        <button type="button" class="btn-secondary hidden" id="btnRetryPreviewFailures">仅重试预演失败岗位</button>
+        <div id="bulkPreviewActions" class="bulk-review-actions bulk-preview-actions hidden">
+          <label><input type="checkbox" id="selectAllPreviews"> 全选待确认预演</label>
+          <button type="button" id="btnBulkConfirmPreviews" class="approve">一键确认预演（0）</button>
+        </div>
       </div>
-      <div id="previewList"><div class="empty">批准岗位后点击“预演已批准岗位”</div></div>
-      <button class="btn-live" id="btnDeliver" disabled>暂无可正式投递岗位</button>
-      <div id="deliverDisabledReason" class="disabled-reason">需要先批准岗位并确认预演</div>
-      <div id="batchCompletion" class="batch-completion hidden" role="status" aria-live="polite">
-        <strong id="batchCompletionTitle">本批投递已结束</strong>
-        <div id="batchCompletionSummary" class="batch-summary">成功 0 · 失败 0 · 未执行 0</div>
-        <div class="batch-actions">
-          <button type="button" class="btn-secondary hidden" id="btnRetryDeliveryFailures">仅重试发送前失败岗位</button>
-          <button type="button" class="btn-secondary" id="btnContinueBatch">处理剩余岗位</button>
-          <button type="button" class="btn-go compact" id="btnNextBatch">开始下一批</button>
-          <button type="button" class="btn-secondary" id="btnViewTracker">查看岗位进度</button>
+      <div id="previewList" class="fixed-list-scroll" tabindex="0" aria-label="投递预演列表">
+        <div class="empty">批准岗位后点击“预演已批准岗位”</div>
+      </div>
+      <div class="fixed-list-footer preview-footer">
+        <button class="btn-live" id="btnDeliver" disabled>暂无可正式投递岗位</button>
+        <div id="deliverDisabledReason" class="disabled-reason">需要先批准岗位并确认预演</div>
+        <div id="batchCompletion" class="batch-completion hidden" role="status" aria-live="polite">
+          <strong id="batchCompletionTitle">本批投递已结束</strong>
+          <div id="batchCompletionSummary" class="batch-summary">成功 0 · 失败 0 · 未执行 0</div>
+          <div class="batch-actions">
+            <button type="button" class="btn-secondary hidden" id="btnRetryDeliveryFailures">仅重试发送前失败岗位</button>
+            <button type="button" class="btn-secondary" id="btnContinueBatch">处理剩余岗位</button>
+            <button type="button" class="btn-go compact" id="btnNextBatch">开始下一批</button>
+            <button type="button" class="btn-secondary" id="btnViewTracker">查看岗位进度</button>
+          </div>
         </div>
       </div>
     </div>
@@ -255,6 +265,7 @@
   <script src="preview-run-state.js"></script>
   <script src="job-tracker.js"></script>
   <script src="storage-utils.js"></script>
+  <script src="list-scroll-state.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

@@ -604,3 +604,21 @@ test('侧边栏提供可命名筛选方案、旧配置迁移和条件摘要', ()
   assert.match(js, /SearchProfiles\.upsertProfile/);
   assert.match(js, /searchProfilesState/);
 });
+
+test('岗位审核与投递预演使用固定窗口且只滚动列表', () => {
+  const html = read('src/sidepanel.html');
+  const css = read('src/sidepanel.css');
+
+  assert.match(html, /class="card fixed-list-card" id="reviewCard"/);
+  assert.match(html, /class="card fixed-list-card" id="previewCard"/);
+  assert.match(html, /id="reviewList" class="fixed-list-scroll" tabindex="0"/);
+  assert.match(html, /id="previewList" class="fixed-list-scroll" tabindex="0"/);
+  assert.match(html, /class="sticky-action fixed-list-footer"/);
+  assert.match(html, /class="fixed-list-footer preview-footer"/);
+  assert.ok(html.indexOf('list-scroll-state.js') < html.indexOf('sidepanel.js'));
+
+  assert.match(css, /\.fixed-list-card\s*\{[^}]*height:\s*clamp\(360px,\s*60vh,\s*720px\)/s);
+  assert.match(css, /\.fixed-list-scroll\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/s);
+  assert.match(css, /\.fixed-list-scroll\s*\{[^}]*overscroll-behavior:\s*contain/s);
+  assert.match(css, /\.fixed-list-scroll\s*\{[^}]*scrollbar-gutter:\s*stable/s);
+});
