@@ -21,7 +21,7 @@ test('三段消息严格按 AI 开场、固定消息、简历图片执行', asyn
 });
 
 test('任一步失败立即停止且不执行后续消息', async () => {
-  for (const failedStep of ['aiOpening', 'fixedMessage', 'resumeImage']) {
+  for (const failedStep of ['aiOpening', 'fixedMessage']) {
     const calls = [];
     const handlers = {
       aiOpening: async () => { calls.push('aiOpening'); return { ok: failedStep !== 'aiOpening', error: '失败' }; },
@@ -34,6 +34,28 @@ test('任一步失败立即停止且不执行后续消息', async () => {
     assert.equal(calls[calls.length - 1], failedStep);
     assert.deepEqual(calls, ['aiOpening', 'fixedMessage', 'resumeImage'].slice(0, calls.length));
   }
+});
+
+test('文字已成功时图片失败只产生警告并保持整单成功', async () => {
+  const result = await MessageBundle.run(BUNDLE, {
+    aiOpening: async () => ({ ok: true }),
+    fixedMessage: async () => ({ ok: true }),
+    resumeImage: async () => ({ ok: false, err: '简历图片发送未确认' })
+  });
+  assert.equal(result.success, true);
+  assert.deepEqual(result.completed, ['aiOpening', 'fixedMessage']);
+  assert.equal(result.imageConfirmed, false);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0].error, /图片发送未确认/);
+});
+
+test('只有图片的方案仍要求图片取得回执', async () => {
+  const result = await MessageBundle.run({ image: BUNDLE.image }, {
+    resumeImage: async () => ({ ok: false, err: '简历图片发送未确认' })
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.step, 'resumeImage');
+  assert.equal(result.imageConfirmed, false);
 });
 
 test('未启用的空消息会跳过但至少需要一段内容', async () => {

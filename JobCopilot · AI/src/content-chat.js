@@ -71,7 +71,7 @@
     if (!image) return { ok: true, skipped: true };
     const input = findVisible(IMG_SELS) || document.querySelector('input[type=file]');
     if (!input) return { ok: false, err: '未找到图片上传入口' };
-    const before = document.querySelectorAll(SELECTORS.chat.messageSent).length;
+    const before = ImageReceipt.capture(document, SELECTORS.chat.messageSent);
     const file = dataURLtoFile(image, 'resume.png');
     const dt = new DataTransfer();
     dt.items.add(file);
@@ -80,8 +80,10 @@
     input.dispatchEvent(new Event('change', { bubbles: true }));
     for (let index = 0; index < 20; index++) {
       await sleep(400);
-      const after = document.querySelectorAll(SELECTORS.chat.messageSent).length;
-      if (after > before) return { ok: true };
+      const confirmed = ImageReceipt.findConfirmed(
+        ImageReceipt.collect(document, SELECTORS.chat.messageSent), before
+      );
+      if (confirmed) return { ok: true };
       const failed = document.querySelector('.upload-fail, .upload-error, [class*="upload-fail"]');
       if (failed && failed.offsetParent !== null) return { ok: false, err: '简历图片上传失败' };
     }

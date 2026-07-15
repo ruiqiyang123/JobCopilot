@@ -5,6 +5,7 @@ const WorkflowSafety = require('../src/workflow-safety.js');
 
 const JOB = {
   id: 'job-1',
+  detailUrl: 'https://www.zhipin.com/job_detail/job-1.html',
   name: 'AI 产品经理',
   company: '示例科技',
   experience: 'one_to_three',
@@ -27,11 +28,21 @@ test('岗位 ID、名称和公司一致时身份校验通过', () => {
   assert.deepEqual(result.reasons, []);
 });
 
-test('岗位 ID、名称、公司不一致或当前字段缺失时阻止', () => {
-  assert.equal(WorkflowSafety.verifyIdentity(JOB, Object.assign({}, JOB, { id: 'job-2' })).ok, false);
+test('稳定岗位 ID 不一致或身份字段明确冲突时阻止', () => {
+  assert.equal(WorkflowSafety.verifyIdentity(JOB, Object.assign({}, JOB, {
+    id: 'job-2', detailUrl: 'https://www.zhipin.com/job_detail/job-2.html'
+  })).ok, false);
   assert.equal(WorkflowSafety.verifyIdentity(JOB, Object.assign({}, JOB, { name: '高级产品经理' })).ok, false);
   assert.equal(WorkflowSafety.verifyIdentity(JOB, Object.assign({}, JOB, { company: '另一家公司' })).ok, false);
-  assert.equal(WorkflowSafety.verifyIdentity(JOB, Object.assign({}, JOB, { company: '' })).ok, false);
+});
+
+test('稳定岗位 ID 一致时允许详情名称或公司缺失', () => {
+  assert.equal(WorkflowSafety.verifyIdentity(JOB, Object.assign({}, JOB, { company: '' })).ok, true);
+  assert.equal(WorkflowSafety.verifyIdentity(JOB, Object.assign({}, JOB, { name: '' })).ok, true);
+  assert.equal(WorkflowSafety.verifyIdentity(
+    Object.assign({}, JOB, { id: '', detailUrl: '' }),
+    Object.assign({}, JOB, { id: '', detailUrl: '' })
+  ).ok, false);
 });
 
 test('发送前重新应用筛选条件，并阻止已投岗位', () => {

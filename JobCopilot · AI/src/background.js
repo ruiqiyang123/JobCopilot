@@ -263,7 +263,7 @@ function sendToTab(tabId, message, timeoutMs) {
 
 async function ensureInjected(tabId, file) {
   const files = file === 'src/content-chat.js'
-    ? ['src/selectors.js', 'src/message-bundle.js', 'src/content-chat.js']
+    ? ['src/selectors.js', 'src/message-bundle.js', 'src/image-receipt.js', 'src/content-chat.js']
     : [
       'src/selectors.js', 'src/job-filters.js', 'src/job-detail.js',
       'src/contact-interstitial.js', 'src/content-search.js'
@@ -322,14 +322,21 @@ async function removeTabs(tabIds) {
   for (const tabId of unique) await removeTab(tabId);
 }
 
-async function readDetailFromTab(tabId, job) {
-  const detail = await sendToTab(tabId, { type: 'READ_DETAIL' });
+function normalizeDetailResult(detail, job, cfg) {
   if (!detail || !detail.success || !detail.currentJob) {
     throw new Error((detail && detail.error) || '无法读取岗位详情');
   }
-  const identity = JobDetail.verifyIdentity(job, detail.currentJob);
+  const jd = String(detail.jd || detail.currentJob.jd || '').trim();
+  if (!jd) throw new Error('完整 JD 缺失');
+  const currentJob = JobFilters.applySearchCity(Object.assign({}, detail.currentJob, { jd: jd }), cfg.city);
+  const identity = JobDetail.verifyIdentity(job, currentJob);
   if (!identity.ok) throw new Error('身份校验失败：' + identity.reasons.join('；'));
-  return detail;
+  return Object.assign({}, detail, { jd: jd, currentJob: currentJob });
+}
+
+async function readDetailFromTab(tabId, job, cfg) {
+  const detail = await sendToTab(tabId, { type: 'READ_DETAIL' });
+  return normalizeDetailResult(detail, job, cfg);
 }
 
 async function readJobDetail(job, cfg) {
@@ -337,7 +344,7 @@ async function readJobDetail(job, cfg) {
     let tab = null;
     try {
       tab = await createDetailTab(job.detailUrl, false);
-      return await readDetailFromTab(tab.id, job);
+      return await readDetailFromTab(tab.id, job, cfg);
     } finally {
       if (tab) await removeTab(tab.id);
     }
@@ -349,13 +356,13 @@ async function readJobDetail(job, cfg) {
   if (!detail || !detail.success || !detail.currentJob) {
     throw new Error((detail && detail.error) || '详情链接缺失，搜索页也未找到岗位');
   }
-  return detail;
+  return normalizeDetailResult(detail, job, cfg);
 }
 
 async function openJobForDelivery(job, cfg) {
   if (job.detailUrl) {
     const tab = await createDetailTab(job.detailUrl, false);
-    const detail = await readDetailFromTab(tab.id, job);
+    const detail = await readDetailFromTab(tab.id, job, cfg);
     return { tab: tab, detail: detail, temporary: true };
   }
   const tab = await getSearchTab(cfg);
@@ -364,7 +371,7 @@ async function openJobForDelivery(job, cfg) {
   if (!detail || !detail.success || !detail.currentJob) {
     throw new Error((detail && detail.error) || '无法读取岗位详情');
   }
-  return { tab: tab, detail: detail, temporary: false };
+  return { tab: tab, detail: normalizeDetailResult(detail, job, cfg), temporary: false };
 }
 
 async function establishChatPage(opened, job, temporaryTabIds) {
@@ -1206,7 +1213,18 @@ async function runDeliver(jobIds) {
         throw new Error(stage + '失败：' + ((sent && sent.error) || '未知错误'));
       }
 
-      state.results.push({ id: job.id, name: job.name, ok: true });
+      const completedSteps = Array.isArray(sent.completed) ? sent.completed.slice() : [];
+      const warnings = Array.isArray(sent.warnings) ? sent.warnings.slice() : [];
+      const imageEnabled = plan.resumeImageEnabled && !!plan.resumeImage;
+      const textEnabled = (plan.aiOpeningEnabled && !!preview.aiOpening)
+        || (plan.fixedMessageEnabled && !!preview.fixedMessage);
+      const imageConfirmed = sent.imageConfirmed === true
+        || completedSteps.indexOf('resumeImage') >= 0;
+
+      state.results.push({
+        id: job.id, name: job.name, ok: true,
+        completed: completedSteps, warnings: warnings, imageConfirmed: imageConfirmed
+      });
       state.lastBatch.succeeded.push(job.id);
       markDeliverySucceeded(job.id, Date.now());
       state.processed[job.id] = 1;
@@ -1214,7 +1232,15 @@ async function runDeliver(jobIds) {
       broadcastDeliveryState();
       try { await markTrackerContacted(job); }
       catch (error) { log('岗位已发送，但进度记录更新失败：' + error.message, 'warn'); }
-      log('✓ 三段式投递成功', 'success');
+      if (imageEnabled && imageConfirmed && textEnabled) {
+        log('✓ 招呼文字和简历图片发送成功', 'success');
+      } else if (imageEnabled && !imageConfirmed && textEnabled) {
+        log('✓ 招呼文字发送成功｜简历图片未确认，已继续下一岗位', 'warn');
+      } else if (imageEnabled && imageConfirmed) {
+        log('✓ 简历图片发送成功', 'success');
+      } else {
+        log('✓ 招呼文字发送成功', 'success');
+      }
       progress(index + 1, ids.length, '投递');
       await rand(2500, 4500);
     } catch (error) {

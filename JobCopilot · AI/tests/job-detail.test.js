@@ -34,21 +34,26 @@ test('收集岗位优先使用详情 URL 的稳定 ID 并保留原始字段', ()
   assert.equal(job.companySize, 'hundred_to_499');
 });
 
-test('稳定 ID 相同即可确认身份；无 ID 时要求岗位名和公司严格一致', () => {
-  assert.equal(JobDetail.verifyIdentity(
-    { id: 'same', name: 'AI 产品经理', company: '示例科技' },
-    { id: 'same', name: '产品经理', company: '示例科技有限公司' }
-  ).ok, true);
-
-  assert.equal(JobDetail.verifyIdentity(
-    { id: '', name: 'AI 产品经理', company: '示例科技' },
-    { id: '', name: 'AI产品经理', company: '示例科技' }
-  ).ok, true);
-
+test('稳定 ID 一致时允许详情身份字段缺失，但明确冲突仍阻止', () => {
+  const expected = {
+    id: 'same', detailUrl: 'https://www.zhipin.com/job_detail/same.html',
+    name: 'AI 产品经理', company: '示例科技'
+  };
+  assert.equal(JobDetail.verifyIdentity(expected, {
+    id: 'same', detailUrl: 'https://www.zhipin.com/job_detail/same.html', name: '', company: ''
+  }).ok, true);
+  assert.equal(JobDetail.verifyIdentity(expected, {
+    id: 'same', detailUrl: 'https://www.zhipin.com/job_detail/same.html',
+    name: 'AI 产品经理', company: '另一家公司'
+  }).ok, false);
+  assert.equal(JobDetail.verifyIdentity(expected, {
+    id: 'other', detailUrl: 'https://www.zhipin.com/job_detail/other.html',
+    name: 'AI 产品经理', company: '示例科技'
+  }).ok, false);
   assert.match(JobDetail.verifyIdentity(
     { id: '', name: 'AI 产品经理', company: '示例科技' },
-    { id: '', name: 'AI 产品经理', company: '另一家公司' }
-  ).reasons.join('；'), /公司名称/);
+    { id: '', name: 'AI 产品经理', company: '示例科技' }
+  ).reasons.join('；'), /岗位 ID/);
 });
 
 test('详情字段补全卡片缺失信息但不覆盖稳定身份', () => {
@@ -72,6 +77,23 @@ test('详情字段补全卡片缺失信息但不覆盖稳定身份', () => {
   assert.equal(merged.company, '示例科技');
   assert.equal(merged.companySize, 'hundred_to_499');
   assert.match(merged.jd, /AI Agent/);
+});
+
+test('详情中的未知占位名称视为缺失并沿用收集记录', () => {
+  const merged = JobDetail.mergeDetail({
+    id: 'job-name-fallback',
+    detailUrl: 'https://www.zhipin.com/job_detail/job-name-fallback.html',
+    name: 'AI 应用产品经理',
+    company: '示例科技'
+  }, {
+    id: 'job-name-fallback',
+    detailUrl: 'https://www.zhipin.com/job_detail/job-name-fallback.html',
+    name: '未知岗位',
+    company: '',
+    jd: '负责 AI 应用产品规划。'
+  });
+  assert.equal(merged.name, 'AI 应用产品经理');
+  assert.equal(merged.company, '示例科技');
 });
 
 test('岗位详情合并新增硬筛选事实且不丢失卡片信息', () => {

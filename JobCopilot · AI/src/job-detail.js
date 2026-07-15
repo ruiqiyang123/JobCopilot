@@ -14,6 +14,13 @@
     return cleanText(value).replace(/[\s·•|｜【】()[\]（）,，.。-]/g, '').toLowerCase();
   }
 
+  function optionalIdentity(value, field) {
+    const cleaned = cleanText(value);
+    if (field === 'name' && /^(?:未知岗位|岗位未知|未知职位|职位未知)$/.test(cleaned)) return '';
+    if (field === 'company' && /^(?:未知公司|公司未知)$/.test(cleaned)) return '';
+    return cleaned;
+  }
+
   function canonicalizeDetailUrl(value, baseUrl) {
     try {
       const url = new URL(String(value || ''), baseUrl || 'https://www.zhipin.com/');
@@ -96,19 +103,22 @@
   function verifyIdentity(sourceJob, currentJob) {
     const source = sourceJob || {};
     const current = currentJob || {};
-    const sourceId = extractJobId(source.detailUrl || source.link) || cleanText(source.id);
-    const currentId = extractJobId(current.detailUrl || current.link) || cleanText(current.id);
-
-    if (sourceId && currentId) {
-      if (sourceId === currentId) return { ok: true, reasons: [] };
-      return { ok: false, reasons: ['岗位 ID 已变化'] };
-    }
-
     const reasons = [];
-    if (!normalizeIdentity(source.name) || !normalizeIdentity(current.name)) reasons.push('岗位名称缺失');
-    else if (normalizeIdentity(source.name) !== normalizeIdentity(current.name)) reasons.push('岗位名称已变化');
-    if (!normalizeIdentity(source.company) || !normalizeIdentity(current.company)) reasons.push('公司名称缺失');
-    else if (normalizeIdentity(source.company) !== normalizeIdentity(current.company)) reasons.push('公司名称已变化');
+    const sourceId = extractJobId(source.detailUrl || source.link);
+    const currentId = extractJobId(current.detailUrl || current.link);
+    if (!sourceId || !currentId) reasons.push('岗位 ID 缺失');
+    else if (sourceId !== currentId) reasons.push('岗位 ID 已变化');
+
+    const sourceName = optionalIdentity(source.name, 'name');
+    const currentName = optionalIdentity(current.name, 'name');
+    if (sourceName && currentName && normalizeIdentity(sourceName) !== normalizeIdentity(currentName)) {
+      reasons.push('岗位名称已变化');
+    }
+    const sourceCompany = optionalIdentity(source.company, 'company');
+    const currentCompany = optionalIdentity(current.company, 'company');
+    if (sourceCompany && currentCompany && normalizeIdentity(sourceCompany) !== normalizeIdentity(currentCompany)) {
+      reasons.push('公司名称已变化');
+    }
     return { ok: reasons.length === 0, reasons: reasons };
   }
 
@@ -128,8 +138,8 @@
       id: source.id,
       detailUrl: source.detailUrl || canonicalizeDetailUrl(current.detailUrl || current.link),
       link: source.detailUrl || canonicalizeDetailUrl(current.detailUrl || current.link) || source.link,
-      name: cleanText(current.name) || source.name,
-      company: cleanText(current.company) || source.company,
+      name: optionalIdentity(current.name, 'name') || optionalIdentity(source.name, 'name') || '未知岗位',
+      company: optionalIdentity(current.company, 'company') || optionalIdentity(source.company, 'company'),
       salary: cleanText(current.salary) || source.salary,
       tags: uniqueTexts([].concat(source.tags || [], current.tags || [])),
       rawFacts: rawFacts,
@@ -165,6 +175,7 @@
   return {
     cleanText: cleanText,
     normalizeIdentity: normalizeIdentity,
+    optionalIdentity: optionalIdentity,
     canonicalizeDetailUrl: canonicalizeDetailUrl,
     extractJobId: extractJobId,
     normalizeCollectedJob: normalizeCollectedJob,

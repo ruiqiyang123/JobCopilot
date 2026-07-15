@@ -17,6 +17,8 @@
     const enabled = STEPS.filter(step => String(source[step.valueKey] || '').trim());
     if (!enabled.length) throw new Error('三段式消息没有可发送内容');
     const completed = [];
+    const warnings = [];
+    const hasText = enabled.some(step => step.key === 'aiOpening' || step.key === 'fixedMessage');
     for (const step of enabled) {
       if (typeof senders[step.key] !== 'function') {
         return { success: false, step: step.key, stage: step.label, error: '缺少发送处理器', completed: completed };
@@ -25,17 +27,30 @@
       try { result = await senders[step.key](source[step.valueKey]); }
       catch (error) { result = { ok: false, error: error.message || '发送异常' }; }
       if (!result || result.ok !== true) {
+        const error = (result && (result.error || result.err)) || '发送未确认';
+        if (step.key === 'resumeImage' && hasText) {
+          warnings.push({ step: step.key, stage: step.label, error: error });
+          continue;
+        }
         return {
           success: false,
           step: step.key,
           stage: step.label,
-          error: (result && (result.error || result.err)) || '发送未确认',
-          completed: completed
+          error: error,
+          completed: completed,
+          warnings: warnings,
+          imageConfirmed: false
         };
       }
       completed.push(step.key);
     }
-    return { success: true, completed: completed };
+    const imageEnabled = enabled.some(step => step.key === 'resumeImage');
+    return {
+      success: true,
+      completed: completed,
+      warnings: warnings,
+      imageConfirmed: imageEnabled ? completed.indexOf('resumeImage') >= 0 : null
+    };
   }
 
   return { STEPS: STEPS, run: run };

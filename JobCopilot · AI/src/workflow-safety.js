@@ -1,13 +1,16 @@
 (function initWorkflowSafety(root, factory) {
   let filters = root.JobFilters;
+  let details = root.JobDetail;
   if (!filters && typeof module !== 'undefined' && module.exports) filters = require('./job-filters.js');
-  const api = factory(filters);
+  if (!details && typeof module !== 'undefined' && module.exports) details = require('./job-detail.js');
+  const api = factory(filters, details);
   root.WorkflowSafety = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
-})(typeof globalThis !== 'undefined' ? globalThis : self, function createWorkflowSafety(JobFilters) {
+})(typeof globalThis !== 'undefined' ? globalThis : self, function createWorkflowSafety(JobFilters, JobDetail) {
   'use strict';
 
   if (!JobFilters) throw new Error('WorkflowSafety 需要 JobFilters');
+  if (!JobDetail) throw new Error('WorkflowSafety 需要 JobDetail');
 
   function normalizeIdentity(value) {
     return String(value || '')
@@ -17,28 +20,14 @@
   }
 
   function verifyIdentity(expected, actual) {
-    const source = expected || {};
-    const current = actual || {};
-    const reasons = [];
-
-    if (!source.id || !current.id) reasons.push('岗位 ID 缺失');
-    else if (String(source.id) !== String(current.id)) reasons.push('岗位 ID 已变化');
-
-    if (!source.name || !current.name) reasons.push('岗位名称缺失');
-    else if (normalizeIdentity(source.name) !== normalizeIdentity(current.name)) reasons.push('岗位名称已变化');
-
-    if (!source.company || !current.company) reasons.push('公司名称缺失');
-    else if (normalizeIdentity(source.company) !== normalizeIdentity(current.company)) reasons.push('公司名称已变化');
-
-    return { ok: reasons.length === 0, reasons: reasons };
+    return JobDetail.verifyIdentity(expected, actual);
   }
 
   function verifyEligibility(job, currentJob, filterConfig, processed) {
     const expected = job || {};
     const current = currentJob || {};
     const identity = verifyIdentity(expected, current);
-    const merged = Object.assign({}, expected, current, {
-      id: expected.id || current.id,
+    const merged = Object.assign({}, JobDetail.mergeDetail(expected, current), {
       manualOverride: expected.manualOverride === true
     });
     const filterResult = JobFilters.evaluate(merged, filterConfig);

@@ -198,6 +198,15 @@ test('城市缺失时使用搜索城市兜底，页面明确异地时不覆盖',
   assert.equal(explicit.citySource, 'page');
   assert.equal(explicit.district, '天河区');
   assert.equal(JobFilters.evaluate(explicit, cityOnly).filterStatus, 'fail');
+
+  const staleDetail = JobFilters.applySearchCity({
+    city: '验不限硕士瑞德林深圳',
+    citySource: 'page',
+    locationParseVersion: 1,
+    rawLocationFacts: ['验不限硕士瑞德林深圳']
+  }, '深圳');
+  assert.equal(staleDetail.city, '深圳');
+  assert.equal(staleDetail.citySource, 'search');
 });
 
 test('薪资使用岗位月薪范围求交集，不折算薪数', () => {
