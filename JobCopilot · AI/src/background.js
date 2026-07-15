@@ -2,7 +2,7 @@
 importScripts(
   '/src/selectors.js', '/src/job-filters.js', '/src/job-detail.js',
   '/src/greeting-plans.js', '/src/review-workflow.js', '/src/workflow-safety.js',
-  '/src/job-tracker.js', '/src/llm-client.js'
+  '/src/job-tracker.js', '/src/chat-navigation.js', '/src/llm-client.js'
 );
 
 const CFG_KEYS = [
@@ -207,10 +207,6 @@ function waitTabComplete(tabId, timeoutMs) {
   });
 }
 
-function curUrl(tabId) {
-  return new Promise(resolve => chrome.tabs.get(tabId, tab => resolve((tab && tab.url) || '')));
-}
-
 function sendToTab(tabId, message, timeoutMs) {
   const timeout = Number(timeoutMs) || 12000;
   return new Promise(resolve => {
@@ -236,8 +232,10 @@ async function ensureInjected(tabId, file) {
   const files = file === 'src/content-chat.js'
     ? ['src/selectors.js', 'src/message-bundle.js', 'src/content-chat.js']
     : ['src/selectors.js', 'src/job-filters.js', 'src/job-detail.js', 'src/content-search.js'];
-  try { await chrome.scripting.executeScript({ target: { tabId: tabId }, files: files }); }
-  catch (error) {}
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tabId }, files: files });
+    return true;
+  } catch (error) { return false; }
 }
 
 function resolveCity(cfg) {
@@ -283,6 +281,11 @@ async function removeTab(tabId) {
   try { await chrome.tabs.remove(tabId); } catch (error) {}
 }
 
+async function removeTabs(tabIds) {
+  const unique = Array.from(new Set((tabIds || []).filter(Boolean)));
+  for (const tabId of unique) await removeTab(tabId);
+}
+
 async function readDetailFromTab(tabId, job) {
   const detail = await sendToTab(tabId, { type: 'READ_DETAIL' });
   if (!detail || !detail.success || !detail.currentJob) {
@@ -326,6 +329,42 @@ async function openJobForDelivery(job, cfg) {
     throw new Error((detail && detail.error) || '无法读取岗位详情');
   }
   return { tab: tab, detail: detail, temporary: false };
+}
+
+async function establishChatPage(opened, job, temporaryTabIds) {
+  const before = await chrome.tabs.query({});
+  const observer = ChatNavigation.observe(chrome.tabs, {
+    sourceTabId: opened.tab.id,
+    expectedJobId: job.id,
+    existingTabIds: before.map(tab => tab.id),
+    timeoutMs: 30000,
+    pollIntervalMs: 250,
+    isCancelled: () => state.aborted
+  });
+  try {
+    log('正在点击沟通并等待对应岗位聊天页', 'info');
+    const command = sendToTab(opened.tab.id, { type: 'GO_CHAT', job: job }, 15000);
+    const destination = await ChatNavigation.coordinate(command, observer, () => {
+      log('详情页跳转中，已忽略瞬时消息通道关闭', 'info');
+    });
+    if (!destination || !destination.tab || !destination.tab.id) {
+      throw new Error('未找到对应岗位聊天页');
+    }
+    if (destination.created) temporaryTabIds.add(destination.tab.id);
+    let chatTab = await chrome.tabs.get(destination.tab.id);
+    let identity = ChatNavigation.matchChatUrl(chatTab.url || destination.tab.url || '', job.id);
+    if (!identity.ok) throw new Error(identity.reason);
+    await waitTabComplete(chatTab.id, 20000);
+    chatTab = await chrome.tabs.get(chatTab.id);
+    identity = ChatNavigation.matchChatUrl(chatTab.url || '', job.id);
+    if (!identity.ok) throw new Error(identity.reason);
+    log('已进入对应岗位聊天页', 'success');
+    return { tab: chatTab, created: destination.created, relation: destination.relation };
+  } catch (error) {
+    if (error && error.created && error.tabId) temporaryTabIds.add(error.tabId);
+    observer.cancel();
+    throw error;
+  }
 }
 
 // ── 持久化与迁移 ──
@@ -805,6 +844,7 @@ async function runDeliver(jobIds) {
     await waitIfPaused();
     const job = findScreened(ids[index]);
     let opened = null;
+    const temporaryTabIds = new Set();
     try {
       if (!job) throw new Error('找不到岗位数据');
       state.lastBatch.currentJobId = job.id;
@@ -813,6 +853,7 @@ async function runDeliver(jobIds) {
       log('[' + (index + 1) + '/' + ids.length + '] 正式投递 ' + job.name + ' - ' + (job.company || ''));
 
       opened = await openJobForDelivery(job, cfg);
+      if (opened.temporary) temporaryTabIds.add(opened.tab.id);
       const current = JobDetail.mergeDetail(job, Object.assign({}, opened.detail.currentJob, {
         jd: opened.detail.jd || ''
       }));
@@ -826,22 +867,18 @@ async function runDeliver(jobIds) {
       if (!previewGate.ok) throw new Error(previewGate.reason);
 
       state.lastBatch.currentStep = 'contact';
-      const chat = await sendToTab(opened.tab.id, { type: 'GO_CHAT', job: job });
-      if (!chat || !chat.success) throw new Error('建立沟通失败：' + ((chat && chat.error) || '未知错误'));
-      await waitTabComplete(opened.tab.id);
-      await sleep(1600);
-      const url = await curUrl(opened.tab.id);
-      if (url.indexOf('/web/geek/chat') < 0) throw new Error('建立沟通失败：未进入聊天页面');
+      const chatPage = await establishChatPage(opened, job, temporaryTabIds);
 
-      await ensureInjected(opened.tab.id, 'src/content-chat.js');
+      const injected = await ensureInjected(chatPage.tab.id, 'src/content-chat.js');
+      if (!injected) throw new Error('聊天页脚本注入失败');
       state.lastBatch.currentStep = 'send_bundle';
       const preview = state.previews[job.id];
-      const sent = await sendToTab(opened.tab.id, {
+      const sent = await sendToTab(chatPage.tab.id, {
         type: 'SEND_BUNDLE',
         aiOpening: plan.aiOpeningEnabled ? preview.aiOpening : '',
         fixedMessage: plan.fixedMessageEnabled ? preview.fixedMessage : '',
         image: plan.resumeImageEnabled ? preview.resumeImage : ''
-      });
+      }, 45000);
       if (!sent || !sent.success) {
         const stage = sent && sent.stage ? sent.stage : '发送';
         throw new Error(stage + '失败：' + ((sent && sent.error) || '未知错误'));
@@ -858,14 +895,20 @@ async function runDeliver(jobIds) {
       await rand(2500, 4500);
     } catch (error) {
       const message = error && error.message ? error.message : '投递失败';
-      state.results.push({ id: ids[index], name: job ? job.name : '未知岗位', ok: false, msg: message });
-      state.lastBatch.status = 'failed';
-      state.lastBatch.failed.push({ id: ids[index], step: state.lastBatch.currentStep, error: message });
-      state.lastBatch.notRun = ids.slice(index + 1);
-      log('投递失败，已停止批次：' + message, 'error');
+      if (state.aborted || (error && error.code === 'cancelled')) {
+        state.lastBatch.status = 'stopped';
+        state.lastBatch.notRun = ids.slice(index);
+        log('投递已停止', 'warn');
+      } else {
+        state.results.push({ id: ids[index], name: job ? job.name : '未知岗位', ok: false, msg: message });
+        state.lastBatch.status = 'failed';
+        state.lastBatch.failed.push({ id: ids[index], step: state.lastBatch.currentStep, error: message });
+        state.lastBatch.notRun = ids.slice(index + 1);
+        log('投递失败，已停止批次：' + message, 'error');
+      }
       break;
     } finally {
-      if (opened && opened.temporary) await removeTab(opened.tab.id);
+      await removeTabs(Array.from(temporaryTabIds));
     }
   }
   await finishDeliver();
