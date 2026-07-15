@@ -56,6 +56,15 @@ test('解析合法 BOSS 聊天 URL 并严格匹配岗位 ID', () => {
   assert.equal(ChatNavigation.matchChatUrl(CHAT_URL, 'other-job').ok, false);
 });
 
+test('URL 缺少岗位 ID 时允许页面稳定 ID 精确补充，但拒绝证据冲突', () => {
+  const missingUrl = 'https://www.zhipin.com/web/geek/chat?id=conversation';
+  const matched = ChatNavigation.matchChatIdentity(missingUrl, JOB_ID, JOB_ID);
+  assert.equal(matched.ok, true);
+  assert.equal(matched.identitySource, 'page');
+  assert.equal(ChatNavigation.matchChatIdentity(missingUrl, JOB_ID, 'wrong').ok, false);
+  assert.match(ChatNavigation.matchChatIdentity(CHAT_URL, JOB_ID, 'wrong').reason, /证据冲突/);
+});
+
 test('拒绝非 HTTPS、非 BOSS、非聊天路径和缺少 jobId 的 URL', () => {
   assert.equal(ChatNavigation.parseChatUrl('http://www.zhipin.com/web/geek/chat?jobId=' + JOB_ID).isChat, false);
   assert.equal(ChatNavigation.parseChatUrl('https://example.com/web/geek/chat?jobId=' + JOB_ID).isChat, false);
@@ -146,6 +155,28 @@ test('相关聊天页暂缺 jobId 时等待补齐正确岗位身份', async () =
   const result = await observer.promise;
   assert.equal(result.tab.id, 1);
   assert.equal(result.jobId, JOB_ID);
+});
+
+test('相关聊天页 URL 无 jobId 时可由页面职位卡片稳定 ID 确认', async () => {
+  const tabs = new FakeTabs([{ id: 1, url: DETAIL_URL, status: 'complete' }]);
+  const observer = observe(tabs, {
+    missingJobIdGraceMs: 40,
+    resolvePageJobId: async () => ({ status: 'confirmed', jobId: JOB_ID })
+  });
+  tabs.update(1, { url: 'https://www.zhipin.com/web/geek/chat?id=conversation', status: 'loading' });
+  const result = await observer.promise;
+  assert.equal(result.jobId, JOB_ID);
+  assert.equal(result.identitySource, 'page');
+});
+
+test('相关聊天页页面职位卡片 ID 不一致时仍然阻止发送', async () => {
+  const tabs = new FakeTabs([{ id: 1, url: DETAIL_URL, status: 'complete' }]);
+  const observer = observe(tabs, {
+    missingJobIdGraceMs: 40,
+    resolvePageJobId: async () => ({ status: 'confirmed', jobId: 'wrong' })
+  });
+  tabs.update(1, { url: 'https://www.zhipin.com/web/geek/chat?id=conversation', status: 'loading' });
+  await assert.rejects(observer.promise, /岗位身份不一致/);
 });
 
 test('相关聊天页在宽限期内补齐错误 jobId 时立即阻止', async () => {

@@ -128,6 +128,21 @@
     });
   }
 
+  function shouldStopAfterFailure(context) {
+    const source = context || {};
+    return source.aborted === true || source.globalBlock === true || source.sendStarted === true;
+  }
+
+  function retryableFailedIds(lastBatch) {
+    const batch = lastBatch || {};
+    const ids = new Set();
+    (batch.failed || []).forEach(item => {
+      if (!item || !item.id || item.step === 'send_bundle' || item.sendStarted === true) return;
+      ids.add(String(item.id));
+    });
+    return Array.from(ids);
+  }
+
   return {
     DELIVERY_STATUSES: DELIVERY_STATUSES,
     normalizeJob: normalizeJob,
@@ -138,6 +153,8 @@
     markNotRun: markNotRun,
     activeJobs: activeJobs,
     summarize: summarize,
-    hasUnresolved: hasUnresolved
+    hasUnresolved: hasUnresolved,
+    shouldStopAfterFailure: shouldStopAfterFailure,
+    retryableFailedIds: retryableFailedIds
   };
 });

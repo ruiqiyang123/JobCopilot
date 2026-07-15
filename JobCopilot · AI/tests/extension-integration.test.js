@@ -171,7 +171,9 @@ test('正式投递先观察匹配聊天页，再发送三段消息', () => {
     '观察器必须在 GO_CHAT 之前启动'
   );
   assert.match(establishBody, /ChatNavigation\.coordinate/);
-  assert.match(establishBody, /ChatNavigation\.matchChatUrl/);
+  assert.match(establishBody, /ChatNavigation\.matchChatIdentity/);
+  assert.match(establishBody, /resolvePageJobId/);
+  assert.match(establishBody, /readChatPageIdentity/);
   assert.match(establishBody, /timeoutMs: 30000/);
   assert.match(establishBody, /missingJobIdGraceMs: 12000/);
   assert.match(establishBody, /isCancelled: \(\) => state\.aborted/);
@@ -324,14 +326,40 @@ test('稳定详情链接优先于搜索页卡片，并在详情页补全字段',
   const contentSearch = read('src/content-search.js');
   const manifest = JSON.parse(read('manifest.json'));
 
-  assert.match(background, /createDetailTab\(job\.detailUrl, false\)/);
-  assert.match(background, /READ_DETAIL/);
+  assert.match(background, /openDetailWithRetry\(job, cfg, false\)/);
+  assert.match(background, /READ_DETAIL_STATUS/);
+  assert.match(background, /waitForDetailReady/);
+  assert.match(background, /const timeouts = \[20000, 35000\]/);
   assert.match(background, /JobDetail\.mergeDetail/);
   assert.match(background, /AI 使用完整 JD 快速筛选中/);
   assert.match(contentSearch, /parseDetailPage/);
+  assert.match(contentSearch, /readDetailStatus/);
   assert.match(contentSearch, /JobDetail\.canonicalizeDetailUrl/);
   assert.ok(manifest.content_scripts[0].matches.includes('*://*.zhipin.com/job_detail/*'));
   assert.ok(manifest.content_scripts[0].js.includes('src/job-detail.js'));
+  assert.ok(manifest.content_scripts[0].js.includes('src/detail-readiness.js'));
+});
+
+test('预演和正式投递对发送前瞬时失败有限重试并继续后续岗位', () => {
+  const background = read('src/background.js');
+  const sidepanelHtml = read('src/sidepanel.html');
+  const sidepanelJs = read('src/sidepanel.js');
+
+  assert.match(background, /generateAiOpeningWithRetry/);
+  assert.match(background, /ModelRetry\.MAX_ATTEMPTS/);
+  assert.match(background, /岗位详情加载较慢，自动重试 1\/1/);
+  assert.match(background, /当前岗位预演失败，已继续下一岗位/);
+  assert.match(background, /当前岗位发送前失败，已跳过并继续/);
+  assert.match(background, /BatchLifecycle\.shouldStopAfterFailure/);
+  assert.match(background, /recoverInterruptedLiveBatch/);
+  assert.match(background, /上次发送过程被中断，结果不明确/);
+  assert.ok(
+    background.indexOf("currentStep = 'send_bundle'") < background.indexOf("type: 'SEND_BUNDLE'"),
+    '发送开始标记必须先于 SEND_BUNDLE'
+  );
+  assert.match(sidepanelHtml, /id="btnRetryPreviewFailures"/);
+  assert.match(sidepanelHtml, /id="btnRetryDeliveryFailures"/);
+  assert.match(sidepanelJs, /BatchLifecycle\.retryableFailedIds/);
 });
 
 test('岗位页位置事实变量不会遮蔽浏览器 location', () => {

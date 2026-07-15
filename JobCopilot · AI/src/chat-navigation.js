@@ -44,6 +44,27 @@
     return { ok: true, isChat: true, jobId: parsed.jobId, reason: '' };
   }
 
+  function matchChatIdentity(value, expectedJobId, pageJobId) {
+    const parsed = parseChatUrl(value);
+    const expected = cleanJobId(expectedJobId);
+    const pageId = cleanJobId(pageJobId);
+    if (!parsed.isChat) return { ok: false, isChat: false, jobId: '', reason: parsed.reason };
+    if (parsed.jobId && pageId && parsed.jobId !== pageId) {
+      return { ok: false, isChat: true, jobId: parsed.jobId, reason: '聊天页岗位身份证据冲突，已停止发送' };
+    }
+    const actual = parsed.jobId || pageId;
+    if (!actual) {
+      return { ok: false, isChat: true, jobId: '', reason: '聊天页缺少岗位 ID，已停止发送' };
+    }
+    if (!expected || actual !== expected) {
+      return { ok: false, isChat: true, jobId: actual, reason: '聊天页岗位身份不一致，已停止发送' };
+    }
+    return {
+      ok: true, isChat: true, jobId: actual, reason: '',
+      identitySource: parsed.jobId ? 'url' : 'page'
+    };
+  }
+
   function shouldAwaitNavigation(error) {
     const text = String(error || '');
     return /message (?:channel|port).*closed|port.*closed.*response|message channel is closed/i.test(text)
@@ -75,7 +96,11 @@
       pollIntervalMs,
       Number(config.missingJobIdGraceMs) || 5000
     );
+    const resolvePageJobId = typeof config.resolvePageJobId === 'function'
+      ? config.resolvePageJobId
+      : null;
     const missingJobIdTabs = new Map();
+    const pageIdentityChecks = new Map();
     let settled = false;
     let scanning = false;
     let timeoutId = null;
@@ -96,6 +121,7 @@
       tabsApi.onUpdated.removeListener(onUpdated);
       tabsApi.onCreated.removeListener(onCreated);
       missingJobIdTabs.clear();
+      pageIdentityChecks.clear();
     }
 
     function succeed(result) {
@@ -120,6 +146,39 @@
       return '';
     }
 
+    function inspectPageIdentity(tab, relation, failureDetails) {
+      if (!resolvePageJobId || !relation || settled) return;
+      const tabKey = String(tab.id);
+      const previous = pageIdentityChecks.get(tabKey);
+      if (previous && (previous.running || Date.now() - previous.checkedAt < 500)) return;
+      pageIdentityChecks.set(tabKey, { running: true, checkedAt: Date.now() });
+      Promise.resolve(resolvePageJobId(tab.id)).then(identity => {
+        if (settled) return;
+        pageIdentityChecks.set(tabKey, { running: false, checkedAt: Date.now() });
+        const result = identity || {};
+        const pageJobId = cleanJobId(result.jobId);
+        if (result.status === 'ambiguous') {
+          if (relation === 'source' || relation === 'child') {
+            fail('ambiguous_job_id', '聊天页出现多个岗位 ID，已停止发送', failureDetails);
+          }
+          return;
+        }
+        if (!pageJobId) return;
+        if (pageJobId !== expectedJobId) {
+          if (relation === 'source' || relation === 'child') {
+            fail('job_mismatch', '聊天页岗位身份不一致，已停止发送', failureDetails);
+          }
+          return;
+        }
+        succeed({
+          tab: Object.assign({}, tab), relation: relation,
+          created: failureDetails.created, jobId: pageJobId, identitySource: 'page'
+        });
+      }).catch(() => {
+        if (!settled) pageIdentityChecks.set(tabKey, { running: false, checkedAt: Date.now() });
+      });
+    }
+
     function inspect(tab) {
       if (settled || !tab) return;
       const tabKey = String(tab.id);
@@ -137,11 +196,14 @@
         relation: relation
       };
       if (!parsed.jobId) {
+        inspectPageIdentity(tab, relation, failureDetails);
         if (directlyRelated) {
           const pending = missingJobIdTabs.get(tabKey);
           if (!pending) {
             missingJobIdTabs.set(tabKey, { startedAt: Date.now(), details: failureDetails });
           } else if (Date.now() - pending.startedAt >= missingJobIdGraceMs) {
+            const pageCheck = pageIdentityChecks.get(tabKey);
+            if (pageCheck && pageCheck.running) return;
             fail('missing_job_id', '聊天页缺少岗位 ID，已停止发送', pending.details);
           }
         }
@@ -158,7 +220,8 @@
         tab: Object.assign({}, tab),
         relation: relation,
         created: String(tab.id) !== String(sourceTabId) && !existingTabIds.has(String(tab.id)),
-        jobId: parsed.jobId
+        jobId: parsed.jobId,
+        identitySource: 'url'
       });
     }
 
@@ -247,6 +310,7 @@
   return {
     parseChatUrl: parseChatUrl,
     matchChatUrl: matchChatUrl,
+    matchChatIdentity: matchChatIdentity,
     shouldAwaitNavigation: shouldAwaitNavigation,
     observe: observe,
     coordinate: coordinate

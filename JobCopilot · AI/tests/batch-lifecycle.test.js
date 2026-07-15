@@ -96,3 +96,21 @@ test('只有已批准且尚未处理的岗位也视为未解决', () => {
   assert.equal(BatchLifecycle.hasUnresolved(rejectedOnly), false);
   assert.equal(BatchLifecycle.hasUnresolved(approved), true);
 });
+
+test('发送前普通失败继续批次，发送开始、全局阻断和用户停止必须停批', () => {
+  assert.equal(BatchLifecycle.shouldStopAfterFailure({ sendStarted: false, globalBlock: false }), false);
+  assert.equal(BatchLifecycle.shouldStopAfterFailure({ sendStarted: true, globalBlock: false }), true);
+  assert.equal(BatchLifecycle.shouldStopAfterFailure({ sendStarted: false, globalBlock: true }), true);
+  assert.equal(BatchLifecycle.shouldStopAfterFailure({ aborted: true }), true);
+});
+
+test('只允许重试发送前失败岗位并按岗位 ID 去重', () => {
+  assert.deepEqual(BatchLifecycle.retryableFailedIds({
+    failed: [
+      { id: 'a', step: 'detail' },
+      { id: 'a', step: 'contact' },
+      { id: 'b', step: 'send_bundle' },
+      { id: 'c', step: 'contact', sendStarted: true }
+    ]
+  }), ['a']);
+});

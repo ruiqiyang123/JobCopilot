@@ -907,15 +907,23 @@ function renderPreviewRunError() {
   $('previewRunError').classList.toggle('hidden', !error);
 }
 
-$('btnPreview').addEventListener('click', async () => {
-  const ids = activeJobs().filter(job => job.reviewStatus === 'approved').map(job => job.id);
-  if (!ids.length) return addLog('请先批准至少一个岗位', 'error');
+function failedPreviewIds() {
+  if (!currentLastBatch || currentLastBatch.mode !== 'preview') return [];
+  const approved = new Set(activeJobs()
+    .filter(job => job.reviewStatus === 'approved')
+    .map(job => job.id));
+  return (currentLastBatch.failed || []).map(item => item && item.id)
+    .filter(id => id && approved.has(id));
+}
+
+async function startPreviewForIds(ids, retryOnly) {
+  if (!ids.length) return addLog('没有可预演的已批准岗位', 'error');
   currentPreviewRun = PreviewRunState.start(ids, '');
   renderPreviews();
   try {
     GreetingPlans.validateForSend(selectedPlan());
     setRunning(true);
-    addLog('开始预演 ' + ids.length + ' 个已批准岗位', 'info');
+    addLog((retryOnly ? '重新预演失败的 ' : '开始预演 ') + ids.length + ' 个已批准岗位', 'info');
     const response = await runtimeMessage({ type: 'START_PREVIEW', jobIds: ids });
     if (!response.ok) throw new Error(response.error || '预演启动失败');
     currentPreviewRun = PreviewRunState.attach(
@@ -930,6 +938,16 @@ $('btnPreview').addEventListener('click', async () => {
     renderPreviews();
     addLog(error.message, 'error');
   }
+}
+
+$('btnPreview').addEventListener('click', async () => {
+  const ids = activeJobs().filter(job => job.reviewStatus === 'approved').map(job => job.id);
+  if (!ids.length) return addLog('请先批准至少一个岗位', 'error');
+  await startPreviewForIds(ids, false);
+});
+
+$('btnRetryPreviewFailures').addEventListener('click', async () => {
+  await startPreviewForIds(failedPreviewIds(), true);
 });
 
 function renderRunningPreviewItem(job, runJob) {
@@ -995,7 +1013,7 @@ function renderDeliveryControls(ready) {
   $('btnDeliver').disabled = ready.length === 0;
   $('btnDeliver').textContent = ready.length ? '正式投递 ' + ready.length + ' 个已批准岗位' : '暂无可正式投递岗位';
   $('deliverDisabledReason').textContent = ready.length
-    ? '将严格按预演内容发送，任一步失败立即停止'
+    ? '发送前单岗失败会跳过；开始发送后失败将立即停止整批'
     : '需要先批准岗位并确认预演';
   $('deliverDisabledReason').classList.toggle('disabled-reason', ready.length === 0);
 }
@@ -1009,6 +1027,9 @@ function renderPreviews() {
   const ready = confirmedApprovedJobs();
   renderPreviewButton(approved.length);
   renderPreviewRunError();
+  $('btnRetryPreviewFailures').classList.toggle(
+    'hidden', PreviewRunState.isRunning(currentPreviewRun) || failedPreviewIds().length === 0
+  );
   renderDeliveryControls(ready);
   renderBatchCompletion();
 }
@@ -1019,10 +1040,13 @@ function renderBatchCompletion() {
   $('batchCompletion').classList.toggle('hidden', !finished);
   if (!finished) return;
   const summary = BatchLifecycle.summarize(batch);
-  $('batchCompletionTitle').textContent = summary.failed
-    ? '本批投递已停止' : '本批投递已完成';
+  $('batchCompletionTitle').textContent = batch.status === 'failed' || batch.status === 'stopped'
+    ? '本批投递已停止'
+    : (summary.failed ? '本批投递已完成（部分岗位已跳过）' : '本批投递已完成');
   $('batchCompletionSummary').textContent = '成功 ' + summary.succeeded
     + ' · 失败 ' + summary.failed + ' · 未执行 ' + summary.notRun;
+  $('btnRetryDeliveryFailures').disabled = false;
+  $('btnRetryDeliveryFailures').classList.toggle('hidden', retryableDeliveryJobs().length === 0);
   $('btnContinueBatch').classList.toggle('hidden', !BatchLifecycle.hasUnresolved(normalizedJobs()));
 }
 
@@ -1143,18 +1167,35 @@ $('previewList').addEventListener('click', async event => {
   }
 });
 
-$('btnDeliver').addEventListener('click', () => {
-  const jobs = confirmedApprovedJobs();
+function retryableDeliveryJobs() {
+  if (!currentLastBatch || currentLastBatch.mode !== 'live') return [];
+  const failedBeforeSend = new Set(BatchLifecycle.retryableFailedIds(currentLastBatch));
+  return confirmedApprovedJobs().filter(job => failedBeforeSend.has(job.id));
+}
+
+function startDelivery(jobs, retryOnly) {
   if (!jobs.length) return addLog('没有已批准且已确认预演的岗位', 'error');
   const names = jobs.map(job => job.name + ' - ' + (job.company || '公司未知'));
   const confirmed = window.confirm(
-    '即将使用“' + selectedPlan().name + '”正式投递 ' + jobs.length + ' 个岗位：\n\n'
-      + names.join('\n') + '\n\n将依次发送 AI 开场、固定消息和简历图片。任一步失败会停止整批。确认继续？'
+    (retryOnly ? '即将仅重试发送前失败岗位。\n\n' : '')
+      + '即将使用“' + selectedPlan().name + '”正式投递 ' + jobs.length + ' 个岗位：\n\n'
+      + names.join('\n')
+      + '\n\n发送前失败会跳过当前岗位；开始发送后失败会停止整批。确认继续？'
   );
   if (!confirmed) return;
   setRunning(true);
-  addLog('开始正式投递 ' + jobs.length + ' 个已批准岗位', 'warn');
+  $('btnDeliver').disabled = true;
+  $('btnRetryDeliveryFailures').disabled = true;
+  addLog((retryOnly ? '开始重试 ' : '开始正式投递 ') + jobs.length + ' 个已批准岗位', 'warn');
   chrome.runtime.sendMessage({ type: 'START_DELIVER', jobIds: jobs.map(job => job.id) });
+}
+
+$('btnDeliver').addEventListener('click', () => {
+  startDelivery(confirmedApprovedJobs(), false);
+});
+
+$('btnRetryDeliveryFailures').addEventListener('click', () => {
+  startDelivery(retryableDeliveryJobs(), true);
 });
 
 // ── 岗位进度 ──

@@ -196,6 +196,7 @@
     <div class="card-b">
       <div class="safety-note">预演只生成最终内容；确认后才可进入正式投递。</div>
       <div id="previewRunError" class="preview-run-error hidden" role="alert" aria-live="assertive"></div>
+      <button type="button" class="btn-secondary hidden" id="btnRetryPreviewFailures">仅重试预演失败岗位</button>
       <div id="previewList"><div class="empty">批准岗位后点击“预演已批准岗位”</div></div>
       <button class="btn-live" id="btnDeliver" disabled>暂无可正式投递岗位</button>
       <div id="deliverDisabledReason" class="disabled-reason">需要先批准岗位并确认预演</div>
@@ -203,6 +204,7 @@
         <strong id="batchCompletionTitle">本批投递已结束</strong>
         <div id="batchCompletionSummary" class="batch-summary">成功 0 · 失败 0 · 未执行 0</div>
         <div class="batch-actions">
+          <button type="button" class="btn-secondary hidden" id="btnRetryDeliveryFailures">仅重试发送前失败岗位</button>
           <button type="button" class="btn-secondary" id="btnContinueBatch">处理剩余岗位</button>
           <button type="button" class="btn-go compact" id="btnNextBatch">开始下一批</button>
           <button type="button" class="btn-secondary" id="btnViewTracker">查看岗位进度</button>

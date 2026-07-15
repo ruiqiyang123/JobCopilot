@@ -1,10 +1,11 @@
 // ===== JobCopilot Service Worker：收集 → 完整 JD 筛选 → 人工批准 → 三段式投递 =====
 importScripts(
   '/src/selectors.js', '/src/job-filters.js', '/src/job-detail.js',
+  '/src/detail-readiness.js', '/src/model-retry.js',
   '/src/greeting-plans.js', '/src/review-workflow.js', '/src/batch-lifecycle.js', '/src/search-strategy.js',
   '/src/match-scoring.js',
   '/src/workflow-safety.js',
-  '/src/job-tracker.js', '/src/chat-navigation.js', '/src/contact-retry.js',
+  '/src/job-tracker.js', '/src/chat-navigation.js', '/src/chat-page-identity.js', '/src/contact-retry.js',
   '/src/storage-utils.js', '/src/llm-client.js'
 );
 
@@ -38,6 +39,12 @@ async function waitIfPaused() { while (state.paused && !state.aborted) await sle
 function resumeFull(cfg) { return String(cfg.resumeText || '').trim(); }
 function findJob(id) { return state.jobs.find(job => job.id === id) || null; }
 function findScreened(id) { return state.screened.find(job => job.id === id) || null; }
+
+function isGlobalBlockingError(error) {
+  if (DetailReadiness.isGlobal(error)) return true;
+  const text = String((error && error.message) || error || '');
+  return /登录已失效|安全验证|人机验证|访问异常|订阅回复弹窗重复出现/.test(text);
+}
 
 async function storageSet(values) {
   try { await chrome.storage.local.set(values); }
@@ -184,7 +191,7 @@ async function scoreJobDetailed(cfg, job) {
   return MatchScoring.toJobResult(MatchScoring.validate(raw, cfg.searchMatchMode || 'balanced'));
 }
 
-async function generateAiOpening(cfg, plan, job, jd) {
+async function generateAiOpening(cfg, plan, job, jd, timeoutMs) {
   const system = '你是求职者本人，正在 BOSS 直聘给 HR 发送第一条个性化开场。'
     + '内容会原样发送，禁止注释、标题、字数说明或虚构经历。\n'
     + '用户规则：' + plan.aiInstruction;
@@ -195,8 +202,32 @@ async function generateAiOpening(cfg, plan, job, jd) {
   const raw = await callLLM(cfg, [
     { role: 'system', content: system },
     { role: 'user', content: user }
-  ], { maxTokens: 420, temperature: 0.45 });
+  ], { maxTokens: 420, temperature: 0.45, timeoutMs: Number(timeoutMs) || 30000 });
   return String(raw || '').trim();
+}
+
+async function generateAiOpeningWithRetry(cfg, plan, job, jd) {
+  const timeouts = [30000, 45000];
+  let lastError = null;
+  for (let attempt = 0; attempt < ModelRetry.MAX_ATTEMPTS; attempt++) {
+    try {
+      return await generateAiOpening(cfg, plan, job, jd, timeouts[attempt]);
+    } catch (error) {
+      lastError = error;
+      if (!ModelRetry.shouldRetry(error, attempt)) {
+        if (attempt === ModelRetry.MAX_ATTEMPTS - 1 && /模型请求超时/.test(error.message || '')) {
+          throw new Error('AI 开场两次请求均超时');
+        }
+        throw error;
+      }
+      log('AI 开场生成超时，自动重试 1/1', 'warn');
+      await sleep(1000);
+    }
+  }
+  if (lastError && /模型请求超时/.test(lastError.message || '')) {
+    throw new Error('AI 开场两次请求均超时');
+  }
+  throw lastError || new Error('AI 个性化开场生成失败');
 }
 
 async function testLLMConnection(config) {
@@ -263,9 +294,9 @@ function sendToTab(tabId, message, timeoutMs) {
 
 async function ensureInjected(tabId, file) {
   const files = file === 'src/content-chat.js'
-    ? ['src/selectors.js', 'src/message-bundle.js', 'src/image-receipt.js', 'src/content-chat.js']
+    ? ['src/selectors.js', 'src/message-bundle.js', 'src/image-receipt.js', 'src/chat-page-identity.js', 'src/content-chat.js']
     : [
-      'src/selectors.js', 'src/job-filters.js', 'src/job-detail.js',
+      'src/selectors.js', 'src/job-filters.js', 'src/job-detail.js', 'src/detail-readiness.js',
       'src/contact-interstitial.js', 'src/content-search.js'
     ];
   try {
@@ -301,15 +332,7 @@ async function getSearchTab(cfg, keyword) {
 async function createDetailTab(detailUrl, active) {
   const url = JobDetail.canonicalizeDetailUrl(detailUrl);
   if (!url) throw new Error('岗位详情链接缺失或无效');
-  const tab = await chrome.tabs.create({ url: url, active: active === true });
-  try {
-    await waitTabComplete(tab.id);
-    await ensureInjected(tab.id, 'src/content-search.js');
-    return tab;
-  } catch (error) {
-    await removeTab(tab.id);
-    throw error;
-  }
+  return chrome.tabs.create({ url: url, active: active === true });
 }
 
 async function removeTab(tabId) {
@@ -339,14 +362,87 @@ async function readDetailFromTab(tabId, job, cfg) {
   return normalizeDetailResult(detail, job, cfg);
 }
 
-async function readJobDetail(job, cfg) {
-  if (job.detailUrl) {
+async function waitForDetailReady(tabId, job, cfg, timeoutMs) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 20000);
+  let lastCode = 'detail_loading';
+  while (Date.now() < deadline) {
+    if (state.aborted) {
+      const cancelled = new Error('任务已停止');
+      cancelled.code = 'cancelled';
+      throw cancelled;
+    }
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (!tab) throw DetailReadiness.error('tab_network_error');
+    } catch (error) {
+      if (error && error.code === 'cancelled') throw error;
+      lastCode = 'tab_network_error';
+      await sleep(500);
+      continue;
+    }
+
+    const injected = await ensureInjected(tabId, 'src/content-search.js');
+    if (!injected) {
+      lastCode = 'script_unavailable';
+      await sleep(500);
+      continue;
+    }
+
+    const response = await sendToTab(tabId, { type: 'READ_DETAIL_STATUS' }, 3000);
+    const code = DetailReadiness.classify(response);
+    lastCode = code;
+    if (code === 'ready') {
+      try {
+        return normalizeDetailResult(response, job, cfg);
+      } catch (error) {
+        const identityError = error || new Error('岗位详情身份校验失败');
+        identityError.code = 'identity_mismatch';
+        identityError.retryable = false;
+        throw identityError;
+      }
+    }
+    if (code !== 'detail_loading') {
+      throw DetailReadiness.error(code, response && response.error);
+    }
+    await sleep(600);
+  }
+  const code = DetailReadiness.shouldRetry(lastCode) ? 'detail_timeout' : lastCode;
+  throw DetailReadiness.error(code);
+}
+
+async function openDetailWithRetry(job, cfg, active) {
+  let lastError = null;
+  const timeouts = [20000, 35000];
+  for (let attempt = 0; attempt < timeouts.length; attempt++) {
     let tab = null;
     try {
-      tab = await createDetailTab(job.detailUrl, false);
-      return await readDetailFromTab(tab.id, job, cfg);
-    } finally {
+      tab = await createDetailTab(job.detailUrl, active === true);
+      const detail = await waitForDetailReady(tab.id, job, cfg, timeouts[attempt]);
+      return { tab: tab, detail: detail, temporary: true, detailAttempts: attempt + 1 };
+    } catch (error) {
+      lastError = error && error.code
+        ? error
+        : DetailReadiness.error('tab_network_error', (error && error.message) || '岗位详情页网络加载失败');
       if (tab) await removeTab(tab.id);
+      if (attempt === 0 && DetailReadiness.shouldRetry(lastError)) {
+        log('岗位详情加载较慢，自动重试 1/1', 'warn');
+        await rand(1000, 1600);
+        continue;
+      }
+      throw lastError;
+    }
+  }
+  throw lastError || DetailReadiness.error('detail_timeout');
+}
+
+async function readJobDetail(job, cfg) {
+  if (job.detailUrl) {
+    let opened = null;
+    try {
+      opened = await openDetailWithRetry(job, cfg, false);
+      return opened.detail;
+    } finally {
+      if (opened && opened.tab) await removeTab(opened.tab.id);
     }
   }
 
@@ -361,9 +457,7 @@ async function readJobDetail(job, cfg) {
 
 async function openJobForDelivery(job, cfg) {
   if (job.detailUrl) {
-    const tab = await createDetailTab(job.detailUrl, false);
-    const detail = await readDetailFromTab(tab.id, job, cfg);
-    return { tab: tab, detail: detail, temporary: true };
+    return openDetailWithRetry(job, cfg, false);
   }
   const tab = await getSearchTab(cfg);
   await ensureInjected(tab.id, 'src/content-search.js');
@@ -374,8 +468,28 @@ async function openJobForDelivery(job, cfg) {
   return { tab: tab, detail: normalizeDetailResult(detail, job, cfg), temporary: false };
 }
 
+async function readChatPageIdentity(tabId) {
+  const injected = await ensureInjected(tabId, 'src/content-chat.js');
+  if (!injected) return { status: 'unknown', jobId: '' };
+  const response = await sendToTab(tabId, { type: 'READ_CHAT_IDENTITY' }, 3000);
+  if (!response || !response.success) return { status: 'unknown', jobId: '' };
+  return {
+    status: response.status || 'unknown',
+    jobId: response.jobId || '',
+    ids: Array.isArray(response.ids) ? response.ids : []
+  };
+}
+
+function chatIdentityError(result) {
+  const error = new Error((result && result.reason) || '聊天页无法确认对应岗位，当前岗位未发送');
+  if (result && /缺少岗位 ID/.test(result.reason || '')) error.code = 'missing_job_id';
+  else error.code = 'job_mismatch';
+  return error;
+}
+
 async function establishChatPage(opened, job, temporaryTabIds) {
   const before = await chrome.tabs.query({});
+  let pageFallbackLogged = false;
   const observer = ChatNavigation.observe(chrome.tabs, {
     sourceTabId: opened.tab.id,
     expectedJobId: job.id,
@@ -383,6 +497,13 @@ async function establishChatPage(opened, job, temporaryTabIds) {
     timeoutMs: 30000,
     missingJobIdGraceMs: 12000,
     pollIntervalMs: 250,
+    resolvePageJobId: async tabId => {
+      if (!pageFallbackLogged) {
+        pageFallbackLogged = true;
+        log('聊天 URL 缺少岗位 ID，正在读取页面职位卡片', 'info');
+      }
+      return readChatPageIdentity(tabId);
+    },
     isCancelled: () => state.aborted
   });
   try {
@@ -396,12 +517,22 @@ async function establishChatPage(opened, job, temporaryTabIds) {
     }
     if (destination.created) temporaryTabIds.add(destination.tab.id);
     let chatTab = await chrome.tabs.get(destination.tab.id);
-    let identity = ChatNavigation.matchChatUrl(chatTab.url || destination.tab.url || '', job.id);
-    if (!identity.ok) throw new Error(identity.reason);
-    await waitTabComplete(chatTab.id, 20000);
+    let pageJobId = destination.identitySource === 'page' ? destination.jobId : '';
+    let identity = ChatNavigation.matchChatIdentity(
+      chatTab.url || destination.tab.url || '', job.id, pageJobId
+    );
+    if (!identity.ok) throw chatIdentityError(identity);
+    await sleep(600);
     chatTab = await chrome.tabs.get(chatTab.id);
-    identity = ChatNavigation.matchChatUrl(chatTab.url || '', job.id);
-    if (!identity.ok) throw new Error(identity.reason);
+    if (!ChatNavigation.parseChatUrl(chatTab.url || '').jobId && pageJobId) {
+      const refreshed = await readChatPageIdentity(chatTab.id);
+      pageJobId = refreshed.status === 'confirmed' ? refreshed.jobId : '';
+    }
+    identity = ChatNavigation.matchChatIdentity(chatTab.url || '', job.id, pageJobId);
+    if (!identity.ok) throw chatIdentityError(identity);
+    if (identity.identitySource === 'page') {
+      log('聊天页岗位身份已通过页面职位卡片确认', 'success');
+    }
     log('已进入对应岗位聊天页', 'success');
     return { tab: chatTab, created: destination.created, relation: destination.relation };
   } catch (error) {
@@ -435,6 +566,27 @@ function broadcastDeliveryState() {
 function migrateDeliveryState() {
   state.jobs = BatchLifecycle.migrate(state.jobs, state.processed, state.lastBatch);
   state.screened = BatchLifecycle.migrate(state.screened, state.processed, state.lastBatch);
+}
+
+function recoverInterruptedLiveBatch() {
+  const batch = state.lastBatch;
+  if (!batch || batch.mode !== 'live' || batch.status !== 'running') return false;
+  const jobId = String(batch.currentJobId || '');
+  if (batch.currentStep !== 'send_bundle' || !jobId || state.processed[jobId]) return false;
+  const message = '上次发送过程被中断，结果不明确，请先检查 BOSS 会话后再决定是否重试';
+  batch.status = 'failed';
+  batch.finishedAt = Date.now();
+  batch.failed = Array.isArray(batch.failed) ? batch.failed : [];
+  if (!batch.failed.some(item => item && item.id === jobId)) {
+    batch.failed.push({ id: jobId, step: 'send_bundle', sendStarted: true, error: message });
+  }
+  const settled = new Set((batch.succeeded || []).concat(
+    batch.failed.map(item => item && item.id).filter(Boolean)
+  ));
+  batch.notRun = (batch.requestedIds || []).filter(id => !settled.has(id));
+  markDeliveryFailed(jobId, message, 'send_bundle');
+  markDeliveryNotRun(batch.notRun);
+  return true;
 }
 
 function markDeliverySucceeded(jobId, at) {
@@ -471,6 +623,7 @@ async function hydrateReviewState() {
   state.jobs = state.jobs.map(job => migrateReviewJob(job, cfg));
   state.screened = state.screened.map(job => migrateReviewJob(job, cfg));
   migrateDeliveryState();
+  recoverInterruptedLiveBatch();
   await persistReviewState();
   if (saved.resumeImage) await chrome.storage.local.remove('resumeImage');
 }
@@ -991,7 +1144,9 @@ async function runPreview(prepared) {
       if (plan.aiOpeningEnabled) {
         pushPreviewProgress(prepared, original.id, 'generating_opening', state.lastBatch.succeeded.length);
       }
-      const aiOpening = plan.aiOpeningEnabled ? await generateAiOpening(cfg, plan, verified.job, detail.jd || '') : '';
+      const aiOpening = plan.aiOpeningEnabled
+        ? await generateAiOpeningWithRetry(cfg, plan, verified.job, detail.jd || '')
+        : '';
       if (plan.aiOpeningEnabled && !aiOpening) throw new Error('AI 个性化开场生成失败');
       const preview = ReviewWorkflow.createPreview(
         previewInputs(verified.job, cfg, plan, detail.jd || ''),
@@ -1002,25 +1157,39 @@ async function runPreview(prepared) {
       state.lastBatch.succeeded.push(original.id);
       progress(index + 1, ids.length, '预演');
       await persistReviewState();
-      pushPreviewProgress(prepared, original.id, 'draft', state.lastBatch.succeeded.length, '', preview);
+      pushPreviewProgress(prepared, original.id, 'draft', index + 1, '', preview);
     } catch (error) {
+      if (state.aborted || (error && error.code === 'cancelled')) {
+        state.lastBatch.status = 'stopped';
+        state.lastBatch.notRun = ids.slice(index);
+        state.lastBatch.notRun.forEach(id => {
+          pushPreviewProgress(prepared, id, 'not_run', index);
+        });
+        log('预演已停止', 'warn');
+        break;
+      }
       const message = error && error.message ? error.message : '预演失败';
       state.previews[ids[index]] = {
         jobId: ids[index], status: 'failed', aiOpening: '', fixedMessage: '',
         inputFingerprint: '', error: message, createdAt: Date.now()
       };
-      state.lastBatch.status = 'failed';
       state.lastBatch.failed.push({ id: ids[index], error: message });
-      state.lastBatch.notRun = ids.slice(index + 1);
       pushPreviewProgress(
-        prepared, ids[index], 'failed', state.lastBatch.succeeded.length,
+        prepared, ids[index], 'failed', index + 1,
         message, state.previews[ids[index]]
       );
-      state.lastBatch.notRun.forEach(id => {
-        pushPreviewProgress(prepared, id, 'not_run', state.lastBatch.succeeded.length);
-      });
-      log('预演失败，已停止批次：' + message, 'error');
-      break;
+      progress(index + 1, ids.length, '预演');
+      await persistReviewState();
+      if (isGlobalBlockingError(error)) {
+        state.lastBatch.status = 'failed';
+        state.lastBatch.notRun = ids.slice(index + 1);
+        state.lastBatch.notRun.forEach(id => {
+          pushPreviewProgress(prepared, id, 'not_run', index + 1);
+        });
+        log('预演失败，已停止批次：' + message, 'error');
+        break;
+      }
+      log('当前岗位预演失败，已继续下一岗位：' + message, 'warn');
     }
   }
   if (state.lastBatch.status === 'running') state.lastBatch.status = 'completed';
@@ -1032,6 +1201,10 @@ async function runPreview(prepared) {
     type: 'PREVIEWED', runId: prepared.runId, previews: state.previews,
     lastBatch: state.lastBatch, screened: state.screened
   }).catch(() => {});
+  log('预演结束：成功 ' + state.lastBatch.succeeded.length
+    + ' | 失败 ' + state.lastBatch.failed.length
+    + ' | 未执行 ' + state.lastBatch.notRun.length,
+  state.lastBatch.failed.length ? 'warn' : 'success');
 }
 
 async function handlePreviewRunError(error, prepared) {
@@ -1107,7 +1280,7 @@ async function regeneratePreviewOpening(jobId) {
   const jd = String(preview.jd || job.jd || '').trim();
   if (!jd) throw new Error('预演缺少完整 JD，无法重新生成');
 
-  const aiOpening = await generateAiOpening(cfg, plan, job, jd);
+  const aiOpening = await generateAiOpeningWithRetry(cfg, plan, job, jd);
   const regenerated = ReviewWorkflow.regeneratePreview(
     preview,
     previewInputs(job, cfg, plan, jd),
@@ -1201,6 +1374,8 @@ async function runDeliver(jobIds) {
       const injected = await ensureInjected(chatPage.tab.id, 'src/content-chat.js');
       if (!injected) throw new Error('聊天页脚本注入失败');
       state.lastBatch.currentStep = 'send_bundle';
+      await persistReviewState();
+      broadcastDeliveryState();
       const preview = state.previews[job.id];
       const sent = await sendToTab(chatPage.tab.id, {
         type: 'SEND_BUNDLE',
@@ -1252,12 +1427,26 @@ async function runDeliver(jobIds) {
         log('投递已停止', 'warn');
       } else {
         state.results.push({ id: ids[index], name: job ? job.name : '未知岗位', ok: false, msg: message });
-        state.lastBatch.status = 'failed';
         state.lastBatch.failed.push({ id: ids[index], step: state.lastBatch.currentStep, error: message });
-        state.lastBatch.notRun = ids.slice(index + 1);
         markDeliveryFailed(ids[index], message, state.lastBatch.currentStep);
-        markDeliveryNotRun(state.lastBatch.notRun);
-        log('投递失败，已停止批次：' + message, 'error');
+        const sendStarted = state.lastBatch.currentStep === 'send_bundle';
+        const mustStop = BatchLifecycle.shouldStopAfterFailure({
+          sendStarted: sendStarted,
+          globalBlock: isGlobalBlockingError(error),
+          aborted: state.aborted
+        });
+        if (mustStop) {
+          state.lastBatch.status = 'failed';
+          state.lastBatch.notRun = ids.slice(index + 1);
+          markDeliveryNotRun(state.lastBatch.notRun);
+          log('投递失败，已停止批次：' + message, 'error');
+        } else {
+          log('当前岗位发送前失败，已跳过并继续：' + message, 'warn');
+          progress(index + 1, ids.length, '投递');
+        }
+        await persistReviewState();
+        broadcastDeliveryState();
+        if (!mustStop) continue;
       }
       await persistReviewState();
       broadcastDeliveryState();

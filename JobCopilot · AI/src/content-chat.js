@@ -189,6 +189,15 @@
   }
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === 'READ_CHAT_IDENTITY') {
+      try {
+        const identity = ChatPageIdentity.extract(document);
+        sendResponse({ success: true, status: identity.status, jobId: identity.jobId, ids: identity.ids });
+      } catch (error) {
+        sendResponse({ success: false, status: 'unknown', jobId: '', error: error.message });
+      }
+      return;
+    }
     if (msg.type === 'SEND') {
       doSend(msg).then(r => sendResponse(r)).catch(e => sendResponse({ success: false, error: e.message }));
       return true;

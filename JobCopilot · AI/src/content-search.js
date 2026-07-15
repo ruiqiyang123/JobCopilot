@@ -108,6 +108,18 @@
     return /职位已下线|停止招聘|职位不存在|页面不存在|该职位不存在/.test(text);
   }
 
+  function pageLoginRequired() {
+    const href = String(window.location.href || '');
+    const text = (document.body && document.body.innerText) || '';
+    return /\/web\/user\/?|\/login\/?/i.test(href)
+      || (/登录 BOSS直聘|手机号登录|扫码登录/.test(text) && !detailText());
+  }
+
+  function pageRiskControl() {
+    const text = (document.body && document.body.innerText) || '';
+    return /安全验证|人机验证|访问异常|拖动滑块|完成验证/.test(text);
+  }
+
   function parseDetailPage() {
     const detailUrl = JobDetail.canonicalizeDetailUrl(window.location.href);
     if (!detailUrl) return { success: false, error: '当前页面不是有效的岗位详情页' };
@@ -144,6 +156,29 @@
       currentJob: currentJob,
       detailReadAt: Date.now()
     };
+  }
+
+  function readDetailStatus() {
+    if (pageLoginRequired()) {
+      return { success: false, status: 'login_required', error: 'BOSS 登录已失效，请重新登录后重试' };
+    }
+    if (pageRiskControl()) {
+      return { success: false, status: 'risk_control', error: 'BOSS 出现安全验证，已停止整个批次' };
+    }
+    if (pageUnavailable()) {
+      return { success: false, status: 'job_unavailable', unavailable: true, error: '岗位已下架或停止招聘' };
+    }
+    if (!JobDetail.canonicalizeDetailUrl(window.location.href)) {
+      return { success: false, status: 'invalid_page', error: '岗位详情跳转到了非预期页面' };
+    }
+    const detail = parseDetailPage();
+    if (!detail.success) {
+      return Object.assign({}, detail, { status: DetailReadiness.classify(detail) });
+    }
+    if (!String(detail.jd || '').trim()) {
+      return Object.assign({}, detail, { success: false, status: 'detail_loading', error: '完整 JD 尚未出现' });
+    }
+    return Object.assign({}, detail, { status: 'ready' });
   }
 
   function waitFor(selector, timeout) {
@@ -328,6 +363,11 @@
     if (message.type === 'READ_DETAIL') {
       Promise.resolve(parseDetailPage()).then(sendResponse)
         .catch(error => sendResponse({ success: false, error: error.message }));
+      return true;
+    }
+    if (message.type === 'READ_DETAIL_STATUS') {
+      Promise.resolve(readDetailStatus()).then(sendResponse)
+        .catch(error => sendResponse({ success: false, status: 'detail_loading', error: error.message }));
       return true;
     }
     if (message.type === 'OPEN_JD') {
