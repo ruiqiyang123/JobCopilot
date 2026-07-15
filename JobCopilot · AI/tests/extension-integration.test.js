@@ -429,3 +429,23 @@ test('后台按多关键词公平轮询并在读取详情前跨搜索去重', ()
     '必须先完成跨关键词去重，再读取岗位详情'
   );
 });
+
+test('侧边栏可配置多关键词匹配模式和唯一岗位上限', () => {
+  const sidepanelHtml = read('src/sidepanel.html');
+  const sidepanelJs = read('src/sidepanel.js');
+
+  assert.match(sidepanelHtml, /id="searchMatchMode"/);
+  assert.match(sidepanelHtml, /value="precise"/);
+  assert.match(sidepanelHtml, /value="balanced"/);
+  assert.match(sidepanelHtml, /value="loose"/);
+  assert.match(sidepanelHtml, /id="keywordExpansionEnabled"/);
+  assert.match(sidepanelHtml, /id="keywordSearchSummary"/);
+  assert.match(sidepanelHtml, /唯一岗位收集上限/);
+  assert.ok(
+    sidepanelHtml.indexOf('search-strategy.js') < sidepanelHtml.indexOf('sidepanel.js'),
+    '搜索策略必须在侧边栏主脚本前加载'
+  );
+  assert.match(sidepanelJs, /searchMatchMode/);
+  assert.match(sidepanelJs, /keywordExpansionEnabled/);
+  assert.match(sidepanelJs, /SearchStrategy\.resolveTerms/);
+});

@@ -2,9 +2,10 @@
 const $ = id => document.getElementById(id);
 const BASIC_CFG_FIELDS = ['resumeText', 'keyword', 'city', 'count'];
 const LLM_STORAGE_FIELDS = ['llmProvider', 'llmApiKey', 'llmBaseUrl', 'llmModel', 'llmAuthType'];
+const SEARCH_CFG_FIELDS = ['searchMatchMode', 'keywordExpansionEnabled'];
 const LOAD_FIELDS = BASIC_CFG_FIELDS.concat(LLM_STORAGE_FIELDS, [
   'resumeImage', 'dsKey', 'jobFilterConfig', 'greetingPlansState'
-]);
+]).concat(SEARCH_CFG_FIELDS);
 
 let currentScreened = [];
 let currentPreviews = {};
@@ -121,6 +122,28 @@ function readJobFilterForm() {
   });
 }
 
+function readSearchConfig() {
+  return SearchStrategy.normalizeConfig({
+    keyword: $('keyword').value,
+    matchMode: $('searchMatchMode').value,
+    keywordExpansionEnabled: $('keywordExpansionEnabled').checked
+  });
+}
+
+function renderKeywordSearchSummary() {
+  try {
+    const terms = SearchStrategy.resolveTerms({
+      keyword: $('keyword').value,
+      matchMode: $('searchMatchMode').value,
+      keywordExpansionEnabled: $('keywordExpansionEnabled').checked
+    });
+    const preview = terms.slice(0, 4).join('、') + (terms.length > 4 ? '等' : '');
+    $('keywordSearchSummary').textContent = '将依次搜索 ' + terms.length + ' 个关键词：' + preview;
+  } catch (error) {
+    $('keywordSearchSummary').textContent = '填写关键词后将显示实际搜索范围';
+  }
+}
+
 renderFilterOptions('experienceFilterOptions', 'experience', JobFilters.EXPERIENCE_OPTIONS);
 renderFilterOptions('companySizeFilterOptions', 'companySize', JobFilters.COMPANY_SIZE_OPTIONS);
 
@@ -178,6 +201,9 @@ async function persistCurrentConfig() {
   if (!granted) throw new Error('未授权访问该模型接口域名');
   const data = llmStorageFrom(normalized);
   data.jobFilterConfig = readJobFilterForm();
+  const searchConfig = readSearchConfig();
+  data.searchMatchMode = searchConfig.matchMode;
+  data.keywordExpansionEnabled = searchConfig.keywordExpansionEnabled;
   BASIC_CFG_FIELDS.forEach(field => { data[field] = $(field).value.trim(); });
   await localStorageSet(data);
   const invalidated = await runtimeMessage({
@@ -206,6 +232,8 @@ async function loadConfig() {
   BASIC_CFG_FIELDS.forEach(field => {
     if (data[field] !== undefined) $(field).value = data[field];
   });
+  $('searchMatchMode').value = data.searchMatchMode || 'balanced';
+  $('keywordExpansionEnabled').checked = data.keywordExpansionEnabled !== false;
   $('llmProvider').value = data.llmProvider || 'xiaomi';
   $('llmApiKey').value = data.llmApiKey || '';
   $('llmBaseUrl').value = data.llmBaseUrl || '';
@@ -217,6 +245,7 @@ async function loadConfig() {
     resumeImage: data.resumeImage || ''
   });
   renderPlanPicker();
+  renderKeywordSearchSummary();
 }
 
 $('llmProvider').addEventListener('change', () => {
@@ -226,6 +255,9 @@ $('llmProvider').addEventListener('change', () => {
 });
 $('experienceFilterEnabled').addEventListener('change', () => syncFilterEnabled('experience'));
 $('companySizeFilterEnabled').addEventListener('change', () => syncFilterEnabled('companySize'));
+$('keyword').addEventListener('input', renderKeywordSearchSummary);
+$('searchMatchMode').addEventListener('change', renderKeywordSearchSummary);
+$('keywordExpansionEnabled').addEventListener('change', renderKeywordSearchSummary);
 $('saveCfg').addEventListener('click', async () => {
   try { await persistCurrentConfig(); showSaved('saved'); }
   catch (error) { addLog(error.message, 'error'); }
