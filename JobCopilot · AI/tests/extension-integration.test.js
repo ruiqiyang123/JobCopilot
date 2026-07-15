@@ -334,6 +334,14 @@ test('稳定详情链接优先于搜索页卡片，并在详情页补全字段',
   assert.ok(manifest.content_scripts[0].js.includes('src/job-detail.js'));
 });
 
+test('岗位页位置事实变量不会遮蔽浏览器 location', () => {
+  const contentSearch = read('src/content-search.js');
+  assert.doesNotMatch(contentSearch, /const location = JobFilters\.extractLocationFacts/);
+  assert.match(contentSearch, /const locationFacts = JobFilters\.extractLocationFacts/);
+  assert.match(contentSearch, /JobDetail\.canonicalizeDetailUrl\(window\.location\.href\)/);
+  assert.match(contentSearch, /pageUrl: window\.location\.href/);
+});
+
 test('招呼方案和审核状态脚本在侧边栏与后台按依赖顺序加载', () => {
   const background = read('src/background.js');
   const sidepanelHtml = read('src/sidepanel.html');

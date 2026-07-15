@@ -40,7 +40,7 @@
       .map(node => JobDetail.cleanText(node.textContent || '')).filter(Boolean);
     const locationText = textOf(card, SELECTORS.jobs.jobLocation);
     const rawLocationFacts = tags.concat(locationText ? [locationText] : []);
-    const location = JobFilters.extractLocationFacts(rawLocationFacts);
+    const locationFacts = JobFilters.extractLocationFacts(rawLocationFacts);
     const rawFacts = tags.concat([JobDetail.cleanText(card.innerText || '')]);
     const facts = JobFilters.extractFacts(rawFacts);
     return JobDetail.normalizeCollectedJob({
@@ -51,13 +51,13 @@
       rawFacts: rawFacts,
       rawLocationFacts: rawLocationFacts,
       link: link,
-      pageUrl: location.href,
+      pageUrl: window.location.href,
       experience: facts.experience,
       companySize: facts.companySize,
-      city: location.city,
-      district: location.district,
-      citySource: location.citySource,
-      locationParseVersion: location.locationParseVersion,
+      city: locationFacts.city,
+      district: locationFacts.district,
+      citySource: locationFacts.citySource,
+      locationParseVersion: locationFacts.locationParseVersion,
       manualOverride: false
     });
   }
@@ -109,7 +109,7 @@
   }
 
   function parseDetailPage() {
-    const detailUrl = JobDetail.canonicalizeDetailUrl(location.href);
+    const detailUrl = JobDetail.canonicalizeDetailUrl(window.location.href);
     if (!detailUrl) return { success: false, error: '当前页面不是有效的岗位详情页' };
     if (pageUnavailable()) return { success: false, error: '岗位已下线', unavailable: true };
 
@@ -120,7 +120,7 @@
       textOf(document, '.company-info, .company-sider, .sider-company')
     ].filter(Boolean);
     const rawLocationFacts = [textOf(document, SELECTORS.jobs.detailLocation)].filter(Boolean);
-    const location = JobFilters.extractLocationFacts(rawLocationFacts);
+    const locationFacts = JobFilters.extractLocationFacts(rawLocationFacts);
     const facts = JobFilters.extractFacts(rawFacts);
     const currentJob = JobDetail.normalizeCollectedJob({
       id: JobDetail.extractJobId(detailUrl),
@@ -132,10 +132,10 @@
       rawLocationFacts: rawLocationFacts,
       experience: facts.experience,
       companySize: facts.companySize,
-      city: location.city,
-      district: location.district,
-      citySource: location.citySource,
-      locationParseVersion: location.locationParseVersion
+      city: locationFacts.city,
+      district: locationFacts.district,
+      citySource: locationFacts.citySource,
+      locationParseVersion: locationFacts.locationParseVersion
     });
     return {
       success: true,
@@ -261,7 +261,7 @@
   }
 
   async function openJD(job) {
-    if (JobDetail.canonicalizeDetailUrl(location.href)) {
+    if (JobDetail.canonicalizeDetailUrl(window.location.href)) {
       const result = parseDetailPage();
       if (!result.success) return result;
       const identity = JobDetail.verifyIdentity(job, result.currentJob);
@@ -285,7 +285,7 @@
 
   async function goChat(job) {
     let button = await waitForChatButton(5000);
-    if (!button && !JobDetail.canonicalizeDetailUrl(location.href)) {
+    if (!button && !JobDetail.canonicalizeDetailUrl(window.location.href)) {
       const card = findCardByJob(job);
       if (card) { card.click(); await sleep(1200); button = await waitForChatButton(4000); }
     }
