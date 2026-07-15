@@ -14,8 +14,8 @@
 
   function defaultStatus(job) {
     const source = job || {};
-    if (source.filterStatus === 'pending') return 'needs_info';
-    if (source.filterStatus === 'fail' || source.match === false) return 'filtered_out';
+    if (source.filterStatus === 'pending' || source.matchDecision === 'needs_info') return 'needs_info';
+    if (source.filterStatus === 'fail' || source.matchDecision === 'excluded' || source.match === false) return 'filtered_out';
     return 'pending_review';
   }
 
@@ -40,6 +40,20 @@
     }
     source.reviewStatus = decision;
     source.reviewUpdatedAt = Number.isFinite(at) ? at : Date.now();
+    return source;
+  }
+
+  function overrideScore(job, at) {
+    const source = normalizeJob(job);
+    if (source.filterStatus !== 'pass') throw new Error('硬筛选未通过，不能人工覆盖 AI 评分');
+    if (source.matchDecision !== 'needs_info' && source.matchDecision !== 'excluded') {
+      throw new Error('该岗位不需要覆盖 AI 评分');
+    }
+    source.scoreOverride = true;
+    source.scoreOverrideAt = Number.isFinite(at) ? at : Date.now();
+    source.match = true;
+    source.reviewStatus = 'pending_review';
+    source.reviewUpdatedAt = source.scoreOverrideAt;
     return source;
   }
 
@@ -208,6 +222,7 @@
     normalizeJob: normalizeJob,
     normalizeJobs: normalizeJobs,
     setDecision: setDecision,
+    overrideScore: overrideScore,
     inputFingerprintParts: inputFingerprintParts,
     inputFingerprint: inputFingerprint,
     createPreview: createPreview,

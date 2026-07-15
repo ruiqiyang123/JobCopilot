@@ -461,3 +461,23 @@ test('侧边栏可配置多关键词匹配模式和唯一岗位上限', () => {
   assert.match(sidepanelJs, /keywordExpansionEnabled/);
   assert.match(sidepanelJs, /SearchStrategy\.resolveTerms/);
 });
+
+test('AI 筛选使用六维可解释评分并由后台校验和分类', () => {
+  const background = read('src/background.js');
+  const sidepanelHtml = read('src/sidepanel.html');
+  const sidepanelJs = read('src/sidepanel.js');
+
+  assert.match(background, /importScripts\([^)]*match-scoring\.js/);
+  assert.match(background, /MatchScoring\.validate/);
+  assert.match(background, /MatchScoring\.toJobResult/);
+  assert.match(background, /MatchScoring\.pendingResult/);
+  assert.match(background, /OVERRIDE_SCORE/);
+  assert.ok(
+    sidepanelHtml.indexOf('match-scoring.js') < sidepanelHtml.indexOf('sidepanel.js'),
+    '评分规则必须在侧边栏主脚本前加载'
+  );
+  assert.match(sidepanelJs, /MatchScoring\.sortJobs/);
+  assert.match(sidepanelJs, /matchScore/);
+  assert.match(sidepanelJs, /matchDimensions/);
+  assert.match(sidepanelJs, /data-action="override-score"/);
+});

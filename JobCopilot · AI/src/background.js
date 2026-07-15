@@ -2,6 +2,7 @@
 importScripts(
   '/src/selectors.js', '/src/job-filters.js', '/src/job-detail.js',
   '/src/greeting-plans.js', '/src/review-workflow.js', '/src/batch-lifecycle.js', '/src/search-strategy.js',
+  '/src/match-scoring.js',
   '/src/workflow-safety.js',
   '/src/job-tracker.js', '/src/chat-navigation.js', '/src/contact-retry.js',
   '/src/storage-utils.js', '/src/llm-client.js'
@@ -143,23 +144,29 @@ async function callLLM(cfg, messages, options) {
 }
 
 async function screenJob(cfg, job) {
-  const system = '你是资深求职助手。请完全依据求职者简历和岗位完整 JD 判断是否值得投递。'
-    + '保留：方向、技能和经历相关，经验年限、学历和级别够得着。'
-    + '剔除：方向明显无关，硬要求明显超出简历，或岗位级别明显过高。'
-    + '只输出 JSON：{"match":true或false,"reason":"一句具体理由"}。';
-  const user = '求职者简历：\n' + resumeFull(cfg) + '\n\n待判断岗位：\n' + jobInfo(job) + '\n\n严格输出 JSON。';
+  const system = '你是资深 AI 产品招聘经理。只能依据求职者简历事实与岗位完整 JD 评分，禁止虚构。'
+    + '按六个维度评分：岗位方向 30、工作年限 15、产品基本功 20、AI 经历 20、学历背景 5、行业/领域经验 10。'
+    + '每个 evidence 必须明确引用 JD 或简历中的真实证据；总分必须严格等于六个分项之和。'
+    + '只输出 JSON，不要 Markdown：'
+    + '{"score":0,"dimensions":{'
+    + '"roleDirection":{"score":0,"max":30,"evidence":""},'
+    + '"experience":{"score":0,"max":15,"evidence":""},'
+    + '"productFundamentals":{"score":0,"max":20,"evidence":""},'
+    + '"aiExperience":{"score":0,"max":20,"evidence":""},'
+    + '"education":{"score":0,"max":5,"evidence":""},'
+    + '"domain":{"score":0,"max":10,"evidence":""}},'
+    + '"strengths":[""],"risks":[""],"reason":""}。';
+  const user = '求职者简历：\n' + resumeFull(cfg) + '\n\n待评分岗位：\n' + jobInfo(job)
+    + '\n\n严格根据证据评分并输出指定 JSON。';
   const raw = await callLLM(cfg, [
     { role: 'system', content: system },
     { role: 'user', content: user }
-  ], { maxTokens: 240, temperature: 0.3, jsonMode: true });
-  let parsed = null;
-  try { parsed = JSON.parse(raw); }
-  catch (error) {
-    const match = raw && raw.match(/\{[\s\S]*\}/);
-    if (match) { try { parsed = JSON.parse(match[0]); } catch (ignored) {} }
+  ], { maxTokens: 1100, temperature: 0.2, jsonMode: true });
+  try {
+    return MatchScoring.toJobResult(MatchScoring.validate(raw, cfg.searchMatchMode || 'balanced'));
+  } catch (error) {
+    return MatchScoring.pendingResult(error.message || '模型评分格式无法解析');
   }
-  if (!parsed) return { match: false, reason: 'AI 返回格式无法解析' };
-  return { match: parsed.match === true, reason: String(parsed.reason || '').trim() };
 }
 
 async function generateAiOpening(cfg, plan, job, jd) {
@@ -587,9 +594,9 @@ async function runCollect() {
           const result = await screenJob(cfg, job);
           return ReviewWorkflow.normalizeJob(Object.assign({}, job, result));
         } catch (error) {
-          return ReviewWorkflow.normalizeJob(Object.assign({}, job, {
-            match: false, reason: 'AI 筛选异常：' + error.message
-          }));
+          return ReviewWorkflow.normalizeJob(Object.assign(
+            {}, job, MatchScoring.pendingResult('模型调用异常：' + error.message)
+          ));
         }
       }));
       state.screened.push.apply(state.screened, screenedBatch);
@@ -602,7 +609,12 @@ async function runCollect() {
       if (index >= 0) state.jobs[index] = screened;
     });
     const matched = state.screened.filter(job => job.reviewStatus === 'pending_review').length;
-    log('筛选完成：推荐 ' + matched + ' / ' + state.screened.length, 'success');
+    const aiNeedsInfo = state.screened.filter(job => job.filterStatus === 'pass'
+      && job.matchDecision === 'needs_info').length;
+    const aiExcluded = state.screened.filter(job => job.filterStatus === 'pass'
+      && job.matchDecision === 'excluded').length;
+    log('筛选完成：推荐 ' + matched + '，AI 待确认 ' + aiNeedsInfo
+      + '，AI 建议排除 ' + aiExcluded + ' / 总计 ' + state.screened.length, 'success');
     await persistReviewState();
     state.phase = 'review';
     pushPhase();
@@ -628,13 +640,23 @@ async function confirmFilterPending(jobId) {
   const confirmed = JobFilters.confirmPending(job, cfg.jobFilterConfig);
   const aiResult = await screenJob(cfg, confirmed);
   const updated = syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, confirmed, aiResult, {
-    reviewStatus: aiResult.match ? 'pending_review' : 'filtered_out',
+    reviewStatus: '',
     reviewUpdatedAt: Date.now(),
     reason: (confirmed.filterReasons || []).join('；') + '；AI：' + aiResult.reason
   })));
   await persistReviewState();
   chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
   return { screened: state.screened, job: updated };
+}
+
+async function overrideScoreDecision(jobId) {
+  await hydrateReviewState();
+  const job = findScreened(jobId) || findJob(jobId);
+  if (!job) throw new Error('找不到岗位');
+  const updated = syncJob(ReviewWorkflow.overrideScore(job, Date.now()));
+  await persistReviewState();
+  chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
+  return { job: updated, screened: state.screened, previews: state.previews };
 }
 
 async function setReviewDecision(jobId, decision) {
@@ -1135,6 +1157,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     setReviewDecision(message.jobId, message.decision)
       .then(result => sendResponse({ ok: true, result: result }))
       .catch(error => sendResponse({ ok: false, error: error.message || '审核状态更新失败' }));
+    return true;
+  }
+  if (message.type === 'OVERRIDE_SCORE') {
+    overrideScoreDecision(message.jobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || 'AI 评分覆盖失败' }));
     return true;
   }
   if (message.type === 'SAVE_GREETING_PLANS') {

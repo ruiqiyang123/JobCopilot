@@ -28,6 +28,28 @@ test('只有筛选通过且 AI 推荐的岗位可以批准', () => {
   assert.throws(() => ReviewWorkflow.setDecision(Object.assign({}, JOB, { match: false }), 'approved'), /不能批准/);
 });
 
+test('AI 待确认与建议排除进入对应审核状态，并可在硬筛选通过后人工覆盖', () => {
+  const needsInfo = ReviewWorkflow.normalizeJob(Object.assign({}, JOB, {
+    match: false, matchDecision: 'needs_info', reviewStatus: ''
+  }));
+  assert.equal(needsInfo.reviewStatus, 'needs_info');
+
+  const excluded = ReviewWorkflow.normalizeJob(Object.assign({}, JOB, {
+    match: false, matchDecision: 'excluded', reviewStatus: ''
+  }));
+  assert.equal(excluded.reviewStatus, 'filtered_out');
+
+  const overridden = ReviewWorkflow.overrideScore(excluded, 1234);
+  assert.equal(overridden.scoreOverride, true);
+  assert.equal(overridden.match, true);
+  assert.equal(overridden.reviewStatus, 'pending_review');
+  assert.equal(overridden.scoreOverrideAt, 1234);
+
+  assert.throws(() => ReviewWorkflow.overrideScore(Object.assign({}, excluded, {
+    filterStatus: 'fail'
+  })), /硬筛选/);
+});
+
 function previewInputs(overrides) {
   return Object.assign({
     job: JOB,

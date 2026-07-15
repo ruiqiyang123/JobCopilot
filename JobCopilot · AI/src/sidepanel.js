@@ -548,6 +548,50 @@ function reasonClass(job) {
   return 'match';
 }
 
+function matchDecisionLabel(decision) {
+  return ({ recommended: '推荐', needs_info: '待确认', excluded: '建议排除' })[decision] || '未评分';
+}
+
+function renderScoreDetails(job) {
+  const hasScore = job.matchScore !== null && job.matchScore !== undefined
+    && Number.isFinite(Number(job.matchScore));
+  if (!hasScore) {
+    return job.matchDecision === 'needs_info'
+      ? '<div class="score-overview pending"><strong>AI 评分待确认</strong></div>' : '';
+  }
+  const dimensions = job.matchDimensions || {};
+  const ranked = MatchScoring.DIMENSIONS.map(definition => ({
+    key: definition.key,
+    label: definition.label,
+    value: dimensions[definition.key]
+  })).filter(item => item.value).sort((left, right) => {
+    const leftRatio = Number(left.value.score) / Number(left.value.max || 1);
+    const rightRatio = Number(right.value.score) / Number(right.value.max || 1);
+    return rightRatio - leftRatio;
+  });
+  const highlights = ranked.slice(0, 2).map(item =>
+    item.label + ' ' + item.value.score + '/' + item.value.max
+  ).join(' · ');
+  const rows = MatchScoring.DIMENSIONS.map(definition => {
+    const item = dimensions[definition.key];
+    if (!item) return '';
+    return '<div class="score-row"><div><strong>' + esc(definition.label) + '</strong><span>'
+      + esc(item.score) + '/' + esc(item.max) + '</span></div><p>' + esc(item.evidence) + '</p></div>';
+  }).join('');
+  const strengths = (job.matchStrengths || []).length
+    ? '<div class="score-list strengths"><strong>主要优势</strong><ul>'
+      + job.matchStrengths.map(item => '<li>' + esc(item) + '</li>').join('') + '</ul></div>' : '';
+  const risks = (job.matchRisks || []).length
+    ? '<div class="score-list risks"><strong>风险/证据不足</strong><ul>'
+      + job.matchRisks.map(item => '<li>' + esc(item) + '</li>').join('') + '</ul></div>' : '';
+  const decisionClass = job.matchDecision === 'recommended'
+    ? 'recommended' : (job.matchDecision === 'excluded' ? 'excluded' : 'pending');
+  return '<div class="score-overview ' + decisionClass + '"><span class="score-badge">'
+    + esc(job.matchScore) + '</span><div><strong>' + esc(matchDecisionLabel(job.matchDecision))
+    + (job.scoreOverride ? ' · 已人工覆盖' : '') + '</strong><small>' + esc(highlights) + '</small></div></div>'
+    + '<details class="score-details"><summary>查看评分详情</summary>' + rows + strengths + risks + '</details>';
+}
+
 function renderReviewCard(job) {
   const link = safeJobLink(job.detailUrl || job.link);
   const title = link
@@ -556,7 +600,11 @@ function renderReviewCard(job) {
   let actions = '';
   if (link) actions += '<a class="icon-btn" href="' + esc(link) + '" target="_blank" rel="noreferrer">查看完整岗位</a>';
   if (job.reviewStatus === 'needs_info') {
-    actions += '<button data-action="confirm-filter" data-id="' + esc(job.id) + '">确认信息符合</button>';
+    if (job.filterStatus === 'pending') {
+      actions += '<button data-action="confirm-filter" data-id="' + esc(job.id) + '">确认信息符合</button>';
+    } else if (job.filterStatus === 'pass' && job.matchDecision === 'needs_info') {
+      actions += '<button class="approve" data-action="override-score" data-id="' + esc(job.id) + '">人工加入候选</button>';
+    }
     actions += '<button class="reject" data-action="reject" data-id="' + esc(job.id) + '">不投递</button>';
   } else if (job.reviewStatus === 'pending_review' || job.reviewStatus === 'rejected') {
     if (job.filterStatus === 'pass' && job.match === true) {
@@ -567,6 +615,9 @@ function renderReviewCard(job) {
     }
   } else if (job.reviewStatus === 'approved') {
     actions += '<button class="reject" data-action="reject" data-id="' + esc(job.id) + '">取消批准</button>';
+  } else if (job.reviewStatus === 'filtered_out' && job.filterStatus === 'pass'
+      && job.matchDecision === 'excluded') {
+    actions += '<button class="approve" data-action="override-score" data-id="' + esc(job.id) + '">人工加入候选</button>';
   }
   const reason = job.reason || (job.filterReasons || []).join('；') || '等待审核';
   const jd = String(job.jd || '').trim();
@@ -578,6 +629,7 @@ function renderReviewCard(job) {
   return '<article class="job-item"><div class="job-head"><div class="job-title">' + title + '</div>'
     + '<span class="preview-status' + (job.deliveryStatus === 'failed' ? ' failed' : '') + '">' + esc(statusText) + '</span></div>'
     + '<div class="job-meta">' + esc(jobFactsText(job)) + '</div>'
+    + renderScoreDetails(job)
     + '<div class="job-reason ' + reasonClass(job) + '">' + esc(reason) + '</div>'
     + detailError + deliveryError
     + (jd ? '<div class="jd-summary">' + esc(jd) + '</div>' : '')
@@ -600,7 +652,7 @@ function renderReview() {
     if (count) count.textContent = counts[status] || 0;
   });
   $('reviewCount').textContent = activeJobs().length + ' 个待处理岗位';
-  const visible = activeJobs().filter(job => job.reviewStatus === currentReviewTab);
+  const visible = MatchScoring.sortJobs(activeJobs()).filter(job => job.reviewStatus === currentReviewTab);
   $('reviewList').innerHTML = visible.map(renderReviewCard).join('')
     || '<div class="empty">当前分类没有岗位</div>';
   $('approvedSummary').textContent = '已批准 ' + counts.approved + ' 个';
@@ -624,6 +676,8 @@ $('reviewList').addEventListener('click', async event => {
     let response;
     if (button.dataset.action === 'confirm-filter') {
       response = await runtimeMessage({ type: 'CONFIRM_FILTER_PENDING', jobId: jobId });
+    } else if (button.dataset.action === 'override-score') {
+      response = await runtimeMessage({ type: 'OVERRIDE_SCORE', jobId: jobId });
     } else {
       response = await runtimeMessage({
         type: 'SET_REVIEW_DECISION', jobId: jobId,
