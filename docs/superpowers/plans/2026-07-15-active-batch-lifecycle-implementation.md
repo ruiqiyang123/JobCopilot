@@ -29,7 +29,7 @@
 - 创建：`JobCopilot · AI/src/batch-lifecycle.js`
 - 创建：`JobCopilot · AI/tests/batch-lifecycle.test.js`
 
-- [ ] **步骤 1：编写失败的状态规则测试**
+- [x] **步骤 1：编写失败的状态规则测试**
 
 测试必须明确：
 
@@ -42,19 +42,20 @@ assert.equal(BatchLifecycle.migrate(jobs, { a: 1 }, null)[0].deliveryStatus, 'su
 assert.deepEqual(BatchLifecycle.summarize(lastBatch), { succeeded: 1, failed: 1, notRun: 1, total: 3 });
 ```
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`node --test tests/batch-lifecycle.test.js`
 
 预期：FAIL，提示找不到 `../src/batch-lifecycle.js`。
 
-- [ ] **步骤 3：实现最小纯规则模块**
+- [x] **步骤 3：实现最小纯规则模块**
 
 公开接口固定为：
 
 ```js
 BatchLifecycle.DELIVERY_STATUSES
 BatchLifecycle.normalizeJob(job)
+BatchLifecycle.normalizeJobs(jobs)
 BatchLifecycle.migrate(jobs, processed, lastBatch)
 BatchLifecycle.markSucceeded(jobs, jobId, at)
 BatchLifecycle.markFailed(jobs, jobId, error, step)
@@ -66,13 +67,13 @@ BatchLifecycle.hasUnresolved(jobs)
 
 成功状态优先级最高；旧 `processed[jobId]` 或 `lastBatch.succeeded` 必须迁移为成功，不能被后续 `failed/not_run` 覆盖。
 
-- [ ] **步骤 4：运行单元测试验证通过**
+- [x] **步骤 4：运行单元测试验证通过**
 
 运行：`node --test tests/batch-lifecycle.test.js`
 
 预期：全部 PASS。
 
-- [ ] **步骤 5：提交纯规则模块**
+- [x] **步骤 5：提交纯规则模块**
 
 ```bash
 git add 'JobCopilot · AI/src/batch-lifecycle.js' 'JobCopilot · AI/tests/batch-lifecycle.test.js'
