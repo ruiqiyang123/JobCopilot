@@ -1032,6 +1032,18 @@ function handleAsyncRunError(error, fallbackPhase, label) {
   pushPhase();
 }
 
+async function resetCurrentBatch() {
+  state.jobs = [];
+  state.screened = [];
+  state.results = [];
+  state.previews = {};
+  state.lastBatch = null;
+  state.phase = 'idle';
+  await chrome.storage.local.remove(['sw_jobs', 'sw_screened', 'sw_previews', 'lastBatch']);
+  pushPhase();
+  log('已重置当前批次（保留配置、岗位进度和已投记录）', 'warn');
+}
+
 // ── 消息入口 ──
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_COLLECT') {
@@ -1129,17 +1141,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
   if (message.type === 'RESET') {
-    state.jobs = [];
-    state.screened = [];
-    state.results = [];
-    state.previews = {};
-    state.lastBatch = null;
-    state.phase = 'idle';
-    chrome.storage.local.remove(['sw_jobs', 'sw_screened', 'sw_previews', 'lastBatch']);
-    pushPhase();
-    log('已重置当前批次（保留配置、岗位进度和已投记录）', 'warn');
-    sendResponse({ ok: true });
-    return;
+    resetCurrentBatch()
+      .then(() => sendResponse({ ok: true }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '当前批次清理失败' }));
+    return true;
   }
   if (message.type === 'GET_STATE') {
     currentStateSnapshot()

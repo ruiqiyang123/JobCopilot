@@ -374,12 +374,19 @@ test('后台逐岗位持久化投递结果并保留历史与配置', () => {
   const resetStart = background.indexOf("if (message.type === 'RESET')");
   const resetEnd = background.indexOf("if (message.type === 'GET_STATE')", resetStart);
   const resetBody = background.slice(resetStart, resetEnd);
-  assert.match(resetBody, /sw_jobs/);
-  assert.match(resetBody, /sw_screened/);
-  assert.match(resetBody, /sw_previews/);
-  assert.doesNotMatch(resetBody, /remove\([^)]*processed/);
-  assert.doesNotMatch(resetBody, /remove\([^)]*jobTrackerRecords/);
-  assert.doesNotMatch(resetBody, /remove\([^)]*greetingPlansState/);
+  const resetHelperStart = background.indexOf('async function resetCurrentBatch');
+  const resetHelperEnd = background.indexOf('// ── 消息入口 ──', resetHelperStart);
+  const resetHelper = background.slice(resetHelperStart, resetHelperEnd);
+  assert.ok(resetHelperStart >= 0, '缺少可等待的当前批次清理函数');
+  assert.match(resetHelper, /sw_jobs/);
+  assert.match(resetHelper, /sw_screened/);
+  assert.match(resetHelper, /sw_previews/);
+  assert.doesNotMatch(resetHelper, /remove\([^)]*processed/);
+  assert.doesNotMatch(resetHelper, /remove\([^)]*jobTrackerRecords/);
+  assert.doesNotMatch(resetHelper, /remove\([^)]*greetingPlansState/);
+  assert.match(resetHelper, /await chrome\.storage\.local\.remove/);
+  assert.match(resetBody, /resetCurrentBatch\(\)/);
+  assert.match(resetBody, /return true/);
 });
 
 test('侧边栏只操作活动岗位并提供批次完成与下一批入口', () => {
