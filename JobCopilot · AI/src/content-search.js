@@ -1,39 +1,65 @@
-// ===== 搜索页 content script：收集岗位 + 建立联系（立即沟通→继续沟通跳聊天页）=====
+// ===== BOSS 岗位页 content script：收集、详情读取和建立联系 =====
 (function () {
   if (window.__bossToudiSearch) return;
   window.__bossToudiSearch = true;
 
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-  function getCards() { return Array.from(document.querySelectorAll(SELECTORS.jobs.jobCard)); }
+  function visible(element) {
+    return element && (element.offsetParent !== null || getComputedStyle(element).position === 'fixed');
+  }
+
+  function firstElement(root, selectors) {
+    const scope = root || document;
+    const values = String(selectors || '').split(',').map(value => value.trim()).filter(Boolean);
+    for (const selector of values) {
+      const element = scope.querySelector(selector);
+      if (element) return element;
+    }
+    return null;
+  }
+
+  function textOf(root, selectors) {
+    const element = firstElement(root, selectors);
+    return element ? JobDetail.cleanText(element.textContent || '') : '';
+  }
+
+  function getCards() {
+    const seen = new Set();
+    return Array.from(document.querySelectorAll(SELECTORS.jobs.jobCard)).filter(card => {
+      if (seen.has(card)) return false;
+      seen.add(card);
+      return !!firstElement(card, SELECTORS.jobs.jobName);
+    });
+  }
 
   function parseCard(card) {
-    const nameEl = card.querySelector(SELECTORS.jobs.jobName);
-    const salEl = card.querySelector(SELECTORS.jobs.jobSalary);
-    const linkEl = card.querySelector('a[href*="/job_detail/"]') || card.querySelector('a[ka][href]') || card.querySelector('a');
-    const link = linkEl ? linkEl.href : '';
-    const m = link.match(/job_detail\/([^.?]+)\.html/);
-    const id = (m && m[1]) || ((nameEl ? nameEl.textContent.trim() : '') + '|' + (salEl ? salEl.textContent.trim() : ''));
-    const tagNodes = card.querySelectorAll(
-      SELECTORS.jobs.tagList + ', .company-tag-list li, [class*="company-tag"] li, .company-info li'
-    );
-    const tags = Array.from(tagNodes).map(t => t.textContent.trim()).filter(Boolean)
-      .filter((value, index, values) => values.indexOf(value) === index);
-    let company = '';
-    const compEl = card.querySelector('.company-name a, .company-name, [class*="company-name"], .boss-info .company-name, .company-info a, [class*="company"] a');
-    if (compEl) company = compEl.textContent.trim();
-    const facts = JobFilters.extractFacts(tags.concat([(card.innerText || '').trim()]));
-    return {
-      id: id,
-      name: nameEl ? nameEl.textContent.trim() : '未知岗位',
-      salary: salEl ? salEl.textContent.trim() : '',
+    const linkElement = card.querySelector('a[href*="/job_detail/"]') || card.querySelector('a[ka][href]');
+    const link = linkElement ? linkElement.href : '';
+    const tags = Array.from(card.querySelectorAll(SELECTORS.jobs.tagList))
+      .map(node => JobDetail.cleanText(node.textContent || '')).filter(Boolean);
+    const locationText = textOf(card, SELECTORS.jobs.jobLocation);
+    const rawLocationFacts = tags.concat(locationText ? [locationText] : []);
+    const locationFacts = JobFilters.extractLocationFacts(rawLocationFacts);
+    const rawFacts = tags.concat([JobDetail.cleanText(card.innerText || '')]);
+    const facts = JobFilters.extractFacts(rawFacts);
+    return JobDetail.normalizeCollectedJob({
+      name: textOf(card, SELECTORS.jobs.jobName),
+      salary: textOf(card, SELECTORS.jobs.jobSalary),
+      company: textOf(card, SELECTORS.jobs.company),
       tags: tags,
-      company: company,
+      rawFacts: rawFacts,
+      rawLocationFacts: rawLocationFacts,
       link: link,
+      pageUrl: window.location.href,
       experience: facts.experience,
       companySize: facts.companySize,
+      city: locationFacts.city,
+      district: locationFacts.district,
+      citySource: locationFacts.citySource,
+      locationParseVersion: locationFacts.locationParseVersion,
       manualOverride: false
-    };
+    });
   }
 
   async function scrape(count) {
@@ -43,9 +69,14 @@
     for (let loop = 0; loop < 40 && jobs.length < count && stall < 4; loop++) {
       const cards = getCards();
       let added = 0;
-      for (const c of cards) {
-        const j = parseCard(c);
-        if (j.id && !seen[j.id]) { seen[j.id] = 1; jobs.push(j); added++; if (jobs.length >= count) break; }
+      for (const card of cards) {
+        const job = parseCard(card);
+        if (job.id && !seen[job.id]) {
+          seen[job.id] = true;
+          jobs.push(job);
+          added++;
+          if (jobs.length >= count) break;
+        }
       }
       if (added === 0) stall++; else stall = 0;
       if (jobs.length >= count) break;
@@ -59,89 +90,294 @@
 
   function findCardByJob(job) {
     const cards = getCards();
-    for (const c of cards) { const j = parseCard(c); if (job.id && j.id === job.id) return c; }
-    for (const c of cards) { const j = parseCard(c); if (j.name === job.name && (!job.company || j.company === job.company)) return c; }
+    for (const card of cards) {
+      const current = parseCard(card);
+      if (JobDetail.verifyIdentity(job, current).ok) return card;
+    }
     return null;
   }
 
-  function waitFor(sel, timeout) {
-    return new Promise((resolve) => {
-      const t0 = Date.now();
-      const iv = setInterval(() => {
-        const el = document.querySelector(sel);
-        if (el && el.offsetParent !== null) { clearInterval(iv); resolve(el); }
-        else if (Date.now() - t0 > timeout) { clearInterval(iv); resolve(null); }
+  function detailText() {
+    const nodes = Array.from(document.querySelectorAll(SELECTORS.jobs.detailBody));
+    const values = nodes.map(node => (node.innerText || node.textContent || '').trim()).filter(Boolean);
+    return values.filter((value, index) => values.indexOf(value) === index).join('\n').slice(0, 12000);
+  }
+
+  function pageUnavailable() {
+    const text = (document.body && document.body.innerText) || '';
+    return /职位已下线|停止招聘|职位不存在|页面不存在|该职位不存在/.test(text);
+  }
+
+  function pageLoginRequired() {
+    const href = String(window.location.href || '');
+    const text = (document.body && document.body.innerText) || '';
+    return /\/web\/user\/?|\/login\/?/i.test(href)
+      || (/登录 BOSS直聘|手机号登录|扫码登录/.test(text) && !detailText());
+  }
+
+  function pageRiskControl() {
+    const text = (document.body && document.body.innerText) || '';
+    return /安全验证|人机验证|访问异常|拖动滑块|完成验证/.test(text);
+  }
+
+  function parseDetailPage() {
+    const detailUrl = JobDetail.canonicalizeDetailUrl(window.location.href);
+    if (!detailUrl) return { success: false, error: '当前页面不是有效的岗位详情页' };
+    if (pageUnavailable()) return { success: false, error: '岗位已下线', unavailable: true };
+
+    const jd = detailText();
+    const rawFacts = [
+      jd,
+      textOf(document, '.job-banner, .job-primary, .job-detail-header'),
+      textOf(document, '.company-info, .company-sider, .sider-company')
+    ].filter(Boolean);
+    const rawLocationFacts = [textOf(document, SELECTORS.jobs.detailLocation)].filter(Boolean);
+    const locationFacts = JobFilters.extractLocationFacts(rawLocationFacts);
+    const facts = JobFilters.extractFacts(rawFacts);
+    const currentJob = JobDetail.normalizeCollectedJob({
+      id: JobDetail.extractJobId(detailUrl),
+      detailUrl: detailUrl,
+      name: textOf(document, SELECTORS.jobs.detailName),
+      salary: textOf(document, SELECTORS.jobs.detailSalary),
+      company: textOf(document, SELECTORS.jobs.detailCompany),
+      rawFacts: rawFacts,
+      rawLocationFacts: rawLocationFacts,
+      experience: facts.experience,
+      companySize: facts.companySize,
+      city: locationFacts.city,
+      district: locationFacts.district,
+      citySource: locationFacts.citySource,
+      locationParseVersion: locationFacts.locationParseVersion
+    });
+    return {
+      success: true,
+      available: true,
+      jd: jd,
+      currentJob: currentJob,
+      detailReadAt: Date.now()
+    };
+  }
+
+  function readDetailStatus() {
+    if (pageLoginRequired()) {
+      return { success: false, status: 'login_required', error: 'BOSS 登录已失效，请重新登录后重试' };
+    }
+    if (pageRiskControl()) {
+      return { success: false, status: 'risk_control', error: 'BOSS 出现安全验证，已停止整个批次' };
+    }
+    if (pageUnavailable()) {
+      return { success: false, status: 'job_unavailable', unavailable: true, error: '岗位已下架或停止招聘' };
+    }
+    if (!JobDetail.canonicalizeDetailUrl(window.location.href)) {
+      return { success: false, status: 'invalid_page', error: '岗位详情跳转到了非预期页面' };
+    }
+    const detail = parseDetailPage();
+    if (!detail.success) {
+      return Object.assign({}, detail, { status: DetailReadiness.classify(detail) });
+    }
+    if (!String(detail.jd || '').trim()) {
+      return Object.assign({}, detail, { success: false, status: 'detail_loading', error: '完整 JD 尚未出现' });
+    }
+    return Object.assign({}, detail, { status: 'ready' });
+  }
+
+  function waitFor(selector, timeout) {
+    return new Promise(resolve => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const element = document.querySelector(selector);
+        if (visible(element)) { clearInterval(timer); resolve(element); }
+        else if (Date.now() - started > timeout) { clearInterval(timer); resolve(null); }
       }, 200);
     });
   }
 
-  // 等待出现文字完全匹配的可见元素（用于弹窗"继续沟通"按钮）
   function waitForText(texts, timeout) {
-    return new Promise((resolve) => {
-      const t0 = Date.now();
-      const iv = setInterval(() => {
-        const els = document.querySelectorAll('a, button, span, div');
-        for (const el of els) {
-          const tx = (el.textContent || '').trim();
-          if (texts.indexOf(tx) >= 0 && el.offsetParent !== null) { clearInterval(iv); resolve(el); return; }
+    return new Promise(resolve => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const elements = document.querySelectorAll('a, button, span, div');
+        for (const element of elements) {
+          const text = (element.textContent || '').trim();
+          if (texts.indexOf(text) >= 0 && visible(element)) {
+            clearInterval(timer);
+            resolve(element);
+            return;
+          }
         }
-        if (Date.now() - t0 > timeout) { clearInterval(iv); resolve(null); }
+        if (Date.now() - started > timeout) { clearInterval(timer); resolve(null); }
       }, 200);
     });
   }
 
-  // 点开卡片 → 抓取右侧详情面板的完整JD
+  function findChatButton() {
+    let button = document.querySelector(SELECTORS.jobs.immediateChatBtn);
+    if (visible(button)) return button;
+    button = null;
+    const elements = document.querySelectorAll('a, button, span');
+    for (const element of elements) {
+      const text = (element.textContent || '').trim();
+      if ((text === '立即沟通' || text === '继续沟通') && visible(element)) {
+        button = element;
+        break;
+      }
+    }
+    return button;
+  }
+
+  function waitForChatButton(timeout) {
+    return new Promise(resolve => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const button = findChatButton();
+        if (button) { clearInterval(timer); resolve(button); }
+        else if (Date.now() - started > timeout) { clearInterval(timer); resolve(null); }
+      }, 200);
+    });
+  }
+
+  function subscriptionDialog() {
+    if (typeof ContactInterstitial === 'undefined') return null;
+    return ContactInterstitial.findSubscriptionDialog(document, visible);
+  }
+
+  function waitForContactSignal(allowContinue, timeout) {
+    return new Promise(resolve => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const dialog = subscriptionDialog();
+        if (dialog) {
+          clearInterval(timer);
+          resolve({ type: 'subscription', dialog: dialog });
+          return;
+        }
+        if (allowContinue) {
+          const elements = document.querySelectorAll('a, button, span');
+          for (const element of elements) {
+            if ((element.textContent || '').trim() === '继续沟通' && visible(element)) {
+              clearInterval(timer);
+              resolve({ type: 'continue', element: element });
+              return;
+            }
+          }
+        }
+        if (Date.now() - started > timeout) { clearInterval(timer); resolve(null); }
+      }, 200);
+    });
+  }
+
+  function waitForDialogGone(dialog, timeout) {
+    return new Promise(resolve => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const stillTarget = dialog && typeof ContactInterstitial !== 'undefined'
+          && ContactInterstitial.isSubscriptionText(dialog.textContent || '');
+        if (!dialog || !dialog.isConnected || !visible(dialog) || !stillTarget) {
+          clearInterval(timer);
+          resolve(true);
+        } else if (Date.now() - started > timeout) {
+          clearInterval(timer);
+          resolve(false);
+        }
+      }, 150);
+    });
+  }
+
+  async function dismissSubscriptionDialog(dialog) {
+    if (typeof ContactInterstitial === 'undefined') {
+      return { success: false, error: 'BOSS 订阅回复弹窗阻止沟通，请关闭后重试' };
+    }
+    const result = ContactInterstitial.findCloseButton(dialog, visible);
+    if (!result.button) return { success: false, error: result.error };
+    result.button.click();
+    const gone = await waitForDialogGone(dialog, 2500);
+    if (!gone) return { success: false, error: 'BOSS 订阅回复弹窗阻止沟通，请关闭后重试' };
+    return { success: true };
+  }
+
   async function openJD(job) {
+    if (JobDetail.canonicalizeDetailUrl(window.location.href)) {
+      const result = parseDetailPage();
+      if (!result.success) return result;
+      const identity = JobDetail.verifyIdentity(job, result.currentJob);
+      if (!identity.ok) return { success: false, error: '身份校验失败：' + identity.reasons.join('；') };
+      return result;
+    }
+
     const card = findCardByJob(job);
-    if (!card) return { success: false, error: '未找到岗位卡片' };
+    if (!card) return { success: false, error: '搜索页未找到岗位卡片，建议使用岗位详情链接重试' };
     card.scrollIntoView({ block: 'center' });
     await sleep(400);
     card.click();
     await sleep(1600);
-    let jd = '';
-    const det = document.querySelector('.job-detail-box, [class*="job-detail"], .detail-content, .job-detail');
-    if (det) jd = (det.innerText || '').trim();
-    if (!jd) {
-      const secs = document.querySelectorAll('.job-sec-text, [class*="job-sec"], [class*="job-desc"]');
-      jd = Array.from(secs).map(s => (s.innerText || '').trim()).filter(Boolean).join('\n');
-    }
+    const jd = detailText();
     const currentJob = parseCard(card);
     const facts = JobFilters.extractFacts([jd, card.innerText || '']);
     if (facts.experience) currentJob.experience = facts.experience;
     if (facts.companySize) currentJob.companySize = facts.companySize;
-    return { success: true, jd: jd.slice(0, 1800), currentJob: currentJob };
+    return { success: true, available: true, jd: jd, currentJob: currentJob, detailReadAt: Date.now() };
   }
 
-  // 卡片已打开 → 点立即沟通 → 弹窗点"继续沟通"（跳转聊天页）
   async function goChat(job) {
-    let btn = await waitFor(SELECTORS.jobs.immediateChatBtn, 5000);
-    if (!btn) {
-      const all = document.querySelectorAll('a, button, span');
-      for (const el of all) { const tx = (el.textContent || '').trim(); if (tx === '立即沟通' || tx === '继续沟通') { btn = el; break; } }
-    }
-    if (!btn) { // 面板可能关了，重新点卡片
+    let button = await waitForChatButton(5000);
+    if (!button && !JobDetail.canonicalizeDetailUrl(window.location.href)) {
       const card = findCardByJob(job);
-      if (card) { card.click(); await sleep(1200); btn = await waitFor(SELECTORS.jobs.immediateChatBtn, 4000); }
+      if (card) { card.click(); await sleep(1200); button = await waitForChatButton(4000); }
     }
-    if (!btn) return { success: false, error: '未找到立即沟通按钮' };
-    btn.click();
-    await sleep(1500);
-    const go = await waitForText(['继续沟通'], 4000);
-    if (go) { go.click(); return { success: true, navigated: true }; }
-    return { success: true, navigated: false };
+    if (!button) return { success: false, error: '未找到立即沟通按钮' };
+
+    let dismissed = false;
+    let usedContinue = false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const clickedContinue = (button.textContent || '').trim() === '继续沟通';
+      button.click();
+      const signal = await waitForContactSignal(!clickedContinue, clickedContinue ? 1800 : 4000);
+      let dialog = signal && signal.type === 'subscription' ? signal.dialog : null;
+
+      if (signal && signal.type === 'continue') {
+        usedContinue = true;
+        signal.element.click();
+        const afterContinue = await waitForContactSignal(false, 1800);
+        dialog = afterContinue && afterContinue.type === 'subscription' ? afterContinue.dialog : null;
+      }
+
+      if (!dialog) return { success: true, navigated: usedContinue || clickedContinue };
+      if (dismissed) {
+        return { success: false, error: 'BOSS 订阅回复弹窗重复出现，已停止批次' };
+      }
+      const closed = await dismissSubscriptionDialog(dialog);
+      if (!closed.success) return closed;
+      dismissed = true;
+      button = await waitForChatButton(4000);
+      if (!button) return { success: false, error: '关闭订阅回复弹窗后未找到沟通按钮' };
+    }
+    return { success: false, error: 'BOSS 订阅回复弹窗重复出现，已停止批次' };
   }
 
-  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg.type === 'SCRAPE') {
-      scrape(msg.count || 20).then(jobs => sendResponse({ success: true, jobs: jobs })).catch(e => sendResponse({ success: false, error: e.message }));
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type === 'SCRAPE') {
+      scrape(message.count || 20).then(jobs => sendResponse({ success: true, jobs: jobs }))
+        .catch(error => sendResponse({ success: false, error: error.message }));
       return true;
     }
-    if (msg.type === 'OPEN_JD') {
-      openJD(msg.job).then(r => sendResponse(r)).catch(e => sendResponse({ success: false, error: e.message }));
+    if (message.type === 'READ_DETAIL') {
+      Promise.resolve(parseDetailPage()).then(sendResponse)
+        .catch(error => sendResponse({ success: false, error: error.message }));
       return true;
     }
-    if (msg.type === 'GO_CHAT' || msg.type === 'INITIATE' || msg.type === 'CREATE_CONV') {
-      goChat(msg.job).then(r => sendResponse(r)).catch(e => sendResponse({ success: false, error: e.message }));
+    if (message.type === 'READ_DETAIL_STATUS') {
+      Promise.resolve(readDetailStatus()).then(sendResponse)
+        .catch(error => sendResponse({ success: false, status: 'detail_loading', error: error.message }));
+      return true;
+    }
+    if (message.type === 'OPEN_JD') {
+      openJD(message.job).then(sendResponse)
+        .catch(error => sendResponse({ success: false, error: error.message }));
+      return true;
+    }
+    if (message.type === 'GO_CHAT' || message.type === 'INITIATE' || message.type === 'CREATE_CONV') {
+      goChat(message.job).then(sendResponse)
+        .catch(error => sendResponse({ success: false, error: error.message }));
       return true;
     }
   });

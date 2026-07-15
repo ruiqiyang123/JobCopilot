@@ -24,14 +24,63 @@
     Object.freeze({ value: 'ten_thousand_plus', label: '10000 人以上' })
   ]);
 
+  const EMPLOYMENT_TYPE_OPTIONS = Object.freeze([
+    Object.freeze({ value: 'full_time', label: '全职' }),
+    Object.freeze({ value: 'internship', label: '实习' }),
+    Object.freeze({ value: 'part_time', label: '兼职' })
+  ]);
+
+  const EDUCATION_OPTIONS = Object.freeze([
+    Object.freeze({ value: 'any', label: '学历不限' }),
+    Object.freeze({ value: 'junior_college', label: '大专' }),
+    Object.freeze({ value: 'bachelor', label: '本科' }),
+    Object.freeze({ value: 'master', label: '硕士' }),
+    Object.freeze({ value: 'doctorate', label: '博士' })
+  ]);
+
+  const LOCATION_PARSE_VERSION = 2;
+  const KNOWN_CITIES = Object.freeze([
+    '北京', '上海', '广州', '深圳', '杭州', '成都', '武汉', '西安', '南京', '苏州',
+    '天津', '重庆', '长沙', '郑州', '沈阳', '青岛', '合肥', '厦门', '福州', '济南',
+    '宁波', '东莞', '无锡', '昆明', '哈尔滨', '长春', '大连', '石家庄', '珠海', '佛山'
+  ]);
+  const SPECIAL_DISTRICTS = Object.freeze(['大鹏新区', '浦东新区', '滨海新区', '两江新区']);
+
   const DEFAULT_CONFIG = Object.freeze({
     experienceEnabled: true,
     experienceValues: Object.freeze(['under_one', 'one_to_three']),
     companySizeEnabled: true,
     companySizeValues: Object.freeze([
       'hundred_to_499', 'five_hundred_to_999', 'thousand_to_9999', 'ten_thousand_plus'
-    ])
+    ]),
+    employmentTypeEnabled: true,
+    employmentTypeValues: Object.freeze(['full_time']),
+    educationEnabled: true,
+    educationValues: Object.freeze(['any', 'junior_college', 'bachelor', 'master']),
+    salaryEnabled: false,
+    salaryMinK: 15,
+    salaryMaxK: 30,
+    districtEnabled: false,
+    districtValues: Object.freeze([]),
+    publishedTimeEnabled: true,
+    publishedWithinDays: 7,
+    mustWordsEnabled: false,
+    mustWords: Object.freeze([]),
+    mustWordsMode: 'any',
+    excludeWordsEnabled: false,
+    excludeWords: Object.freeze([]),
+    excludeWordsScope: 'title',
+    companyBlacklistEnabled: false,
+    companyBlacklist: Object.freeze([])
   });
+
+  const ADVANCED_FIELDS = [
+    'employmentTypeEnabled', 'employmentTypeValues', 'educationEnabled', 'educationValues',
+    'salaryEnabled', 'salaryMinK', 'salaryMaxK', 'districtEnabled', 'districtValues',
+    'publishedTimeEnabled', 'publishedWithinDays', 'mustWordsEnabled', 'mustWords',
+    'mustWordsMode', 'excludeWordsEnabled', 'excludeWords', 'excludeWordsScope',
+    'companyBlacklistEnabled', 'companyBlacklist'
+  ];
 
   function valuesOf(options) { return options.map(option => option.value); }
   function labelsOf(options) {
@@ -42,15 +91,39 @@
 
   const EXPERIENCE_VALUES = valuesOf(EXPERIENCE_OPTIONS);
   const COMPANY_SIZE_VALUES = valuesOf(COMPANY_SIZE_OPTIONS);
+  const EMPLOYMENT_TYPE_VALUES = valuesOf(EMPLOYMENT_TYPE_OPTIONS);
+  const EDUCATION_VALUES = valuesOf(EDUCATION_OPTIONS);
   const EXPERIENCE_LABELS = labelsOf(EXPERIENCE_OPTIONS);
   const COMPANY_SIZE_LABELS = labelsOf(COMPANY_SIZE_OPTIONS);
+  const EMPLOYMENT_TYPE_LABELS = labelsOf(EMPLOYMENT_TYPE_OPTIONS);
+  const EDUCATION_LABELS = labelsOf(EDUCATION_OPTIONS);
 
   function getDefaultConfig() {
     return {
       experienceEnabled: DEFAULT_CONFIG.experienceEnabled,
       experienceValues: DEFAULT_CONFIG.experienceValues.slice(),
       companySizeEnabled: DEFAULT_CONFIG.companySizeEnabled,
-      companySizeValues: DEFAULT_CONFIG.companySizeValues.slice()
+      companySizeValues: DEFAULT_CONFIG.companySizeValues.slice(),
+      city: '',
+      employmentTypeEnabled: DEFAULT_CONFIG.employmentTypeEnabled,
+      employmentTypeValues: DEFAULT_CONFIG.employmentTypeValues.slice(),
+      educationEnabled: DEFAULT_CONFIG.educationEnabled,
+      educationValues: DEFAULT_CONFIG.educationValues.slice(),
+      salaryEnabled: DEFAULT_CONFIG.salaryEnabled,
+      salaryMinK: DEFAULT_CONFIG.salaryMinK,
+      salaryMaxK: DEFAULT_CONFIG.salaryMaxK,
+      districtEnabled: DEFAULT_CONFIG.districtEnabled,
+      districtValues: DEFAULT_CONFIG.districtValues.slice(),
+      publishedTimeEnabled: DEFAULT_CONFIG.publishedTimeEnabled,
+      publishedWithinDays: DEFAULT_CONFIG.publishedWithinDays,
+      mustWordsEnabled: DEFAULT_CONFIG.mustWordsEnabled,
+      mustWords: DEFAULT_CONFIG.mustWords.slice(),
+      mustWordsMode: DEFAULT_CONFIG.mustWordsMode,
+      excludeWordsEnabled: DEFAULT_CONFIG.excludeWordsEnabled,
+      excludeWords: DEFAULT_CONFIG.excludeWords.slice(),
+      excludeWordsScope: DEFAULT_CONFIG.excludeWordsScope,
+      companyBlacklistEnabled: DEFAULT_CONFIG.companyBlacklistEnabled,
+      companyBlacklist: DEFAULT_CONFIG.companyBlacklist.slice()
     };
   }
 
@@ -63,26 +136,98 @@
     });
   }
 
+  function splitTerms(values) {
+    const source = Array.isArray(values) ? values : String(values || '').split(/[\n,，、;；]+/);
+    const seen = {};
+    return source.map(value => String(value || '').trim()).filter(value => {
+      const key = value.toLowerCase();
+      if (!value || seen[key]) return false;
+      seen[key] = true;
+      return true;
+    });
+  }
+
+  function hasOwn(source, key) {
+    return Object.prototype.hasOwnProperty.call(source, key);
+  }
+
+  function enabledValue(source, key, fallback) {
+    return hasOwn(source, key) ? source[key] !== false : fallback;
+  }
+
+  function finiteNumber(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+  }
+
   function normalizeConfig(config) {
     const source = config || {};
     const defaults = getDefaultConfig();
+    const legacy = Object.keys(source).length > 0 && !ADVANCED_FIELDS.some(field => hasOwn(source, field));
     const normalized = {
-      experienceEnabled: source.experienceEnabled !== false,
+      experienceEnabled: enabledValue(source, 'experienceEnabled', defaults.experienceEnabled),
       experienceValues: uniqueValid(
         Array.isArray(source.experienceValues) ? source.experienceValues : defaults.experienceValues,
         EXPERIENCE_VALUES
       ),
-      companySizeEnabled: source.companySizeEnabled !== false,
+      companySizeEnabled: enabledValue(source, 'companySizeEnabled', defaults.companySizeEnabled),
       companySizeValues: uniqueValid(
         Array.isArray(source.companySizeValues) ? source.companySizeValues : defaults.companySizeValues,
         COMPANY_SIZE_VALUES
-      )
+      ),
+      city: String(source.city || '').trim(),
+      employmentTypeEnabled: enabledValue(source, 'employmentTypeEnabled', legacy ? false : defaults.employmentTypeEnabled),
+      employmentTypeValues: uniqueValid(
+        Array.isArray(source.employmentTypeValues) ? source.employmentTypeValues : defaults.employmentTypeValues,
+        EMPLOYMENT_TYPE_VALUES
+      ),
+      educationEnabled: enabledValue(source, 'educationEnabled', legacy ? false : defaults.educationEnabled),
+      educationValues: uniqueValid(
+        Array.isArray(source.educationValues) ? source.educationValues : defaults.educationValues,
+        EDUCATION_VALUES
+      ),
+      salaryEnabled: enabledValue(source, 'salaryEnabled', false),
+      salaryMinK: finiteNumber(source.salaryMinK, defaults.salaryMinK),
+      salaryMaxK: finiteNumber(source.salaryMaxK, defaults.salaryMaxK),
+      districtEnabled: enabledValue(source, 'districtEnabled', false),
+      districtValues: splitTerms(source.districtValues),
+      publishedTimeEnabled: enabledValue(source, 'publishedTimeEnabled', legacy ? false : defaults.publishedTimeEnabled),
+      publishedWithinDays: Math.max(0, finiteNumber(source.publishedWithinDays, defaults.publishedWithinDays)),
+      mustWordsEnabled: enabledValue(source, 'mustWordsEnabled', false),
+      mustWords: splitTerms(source.mustWords),
+      mustWordsMode: source.mustWordsMode === 'all' ? 'all' : 'any',
+      excludeWordsEnabled: enabledValue(source, 'excludeWordsEnabled', false),
+      excludeWords: splitTerms(source.excludeWords),
+      excludeWordsScope: source.excludeWordsScope === 'title_jd' ? 'title_jd' : 'title',
+      companyBlacklistEnabled: enabledValue(source, 'companyBlacklistEnabled', false),
+      companyBlacklist: splitTerms(source.companyBlacklist)
     };
     if (normalized.experienceEnabled && !normalized.experienceValues.length) {
       throw new Error('工作经验至少选择一个档位');
     }
     if (normalized.companySizeEnabled && !normalized.companySizeValues.length) {
       throw new Error('公司规模至少选择一个档位');
+    }
+    if (normalized.employmentTypeEnabled && !normalized.employmentTypeValues.length) {
+      throw new Error('岗位类型至少选择一个选项');
+    }
+    if (normalized.educationEnabled && !normalized.educationValues.length) {
+      throw new Error('学历要求至少选择一个选项');
+    }
+    if (normalized.salaryEnabled && (normalized.salaryMinK < 0 || normalized.salaryMaxK < normalized.salaryMinK)) {
+      throw new Error('薪资范围填写不正确');
+    }
+    if (normalized.districtEnabled && !normalized.districtValues.length) {
+      throw new Error('行政区筛选启用时至少填写一个行政区');
+    }
+    if (normalized.mustWordsEnabled && !normalized.mustWords.length) {
+      throw new Error('必须包含词启用时至少填写一个关键词');
+    }
+    if (normalized.excludeWordsEnabled && !normalized.excludeWords.length) {
+      throw new Error('排除关键词启用时至少填写一个关键词');
+    }
+    if (normalized.companyBlacklistEnabled && !normalized.companyBlacklist.length) {
+      throw new Error('公司黑名单启用时至少填写一家公司');
     }
     return normalized;
   }
@@ -92,6 +237,10 @@
       .replace(/\s+/g, '')
       .replace(/[－—–~～至到]/g, '-')
       .toLowerCase();
+  }
+
+  function normalizeCompany(value) {
+    return normalizeText(value).replace(/[()（）【】\[\]·•|｜,，.。_-]/g, '');
   }
 
   function experienceFrom(text) {
@@ -115,22 +264,194 @@
     return '';
   }
 
+  function employmentTypeFrom(text) {
+    if (/职位类型[:：]?全职|岗位类型[:：]?全职|全职岗位|全职/.test(text)) return 'full_time';
+    if (/职位类型[:：]?兼职|岗位类型[:：]?兼职|兼职岗位/.test(text)) return 'part_time';
+    if (/职位类型[:：]?实习|岗位类型[:：]?实习|实习生|实习岗位/.test(text)) return 'internship';
+    if (text === '全职') return 'full_time';
+    if (text === '兼职') return 'part_time';
+    if (text === '实习') return 'internship';
+    return '';
+  }
+
+  function educationFrom(text) {
+    const candidates = [
+      { value: 'any', pattern: /学历不限|不限学历/ },
+      { value: 'junior_college', pattern: /大专|专科/ },
+      { value: 'bachelor', pattern: /本科/ },
+      { value: 'master', pattern: /硕士|研究生/ },
+      { value: 'doctorate', pattern: /博士/ }
+    ].map(candidate => Object.assign({}, candidate, { index: text.search(candidate.pattern) }))
+      .filter(candidate => candidate.index >= 0)
+      .sort((left, right) => left.index - right.index);
+    return candidates.length ? candidates[0].value : '';
+  }
+
+  function salaryRangeFrom(text) {
+    const normalized = normalizeText(text);
+    let match = normalized.match(/(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*(k|千)(?:\/月)?/i);
+    let multiplier = 1;
+    if (!match) {
+      match = normalized.match(/(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*万(?:\/月)?/);
+      multiplier = 10;
+    }
+    if (!match) return null;
+    const monthsMatch = normalized.match(/[·x×*]?([1-2]\d)薪/);
+    return {
+      minK: Number(match[1]) * multiplier,
+      maxK: Number(match[2]) * multiplier,
+      months: monthsMatch ? Number(monthsMatch[1]) : 12
+    };
+  }
+
+  function cityPattern() {
+    return '(' + KNOWN_CITIES.slice().sort((left, right) => right.length - left.length).join('|') + ')';
+  }
+
+  function normalizeCityName(value) {
+    const compact = String(value || '').replace(/\s+/g, '').replace(/市$/, '');
+    return KNOWN_CITIES.indexOf(compact) >= 0 ? compact : '';
+  }
+
+  function validDistrict(value) {
+    const district = String(value || '').replace(/\s+/g, '');
+    if (SPECIAL_DISTRICTS.indexOf(district) >= 0) return district;
+    if (!/^[\u4e00-\u9fa5]{1,4}(?:区|县|市)$/.test(district)) return '';
+    if (/(?:社区|园区|区域|片区|校区|景区)$/.test(district)) return '';
+    return district;
+  }
+
+  function districtAfterCity(text, cityEnd) {
+    const remainder = text.slice(cityEnd).replace(/^[市：:·•/\\\s-]+/, '');
+    const match = remainder.match(/^([\u4e00-\u9fa5]{1,5}(?:区|县|市))/);
+    return match ? validDistrict(match[1]) : '';
+  }
+
+  function extractLocationFact(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return { city: '', district: '' };
+    const compact = raw.replace(/\s+/g, '');
+    const cities = cityPattern();
+    const contextual = compact.match(new RegExp('(?:工作地址|工作地点|办公地点|职位地点|所在城市|城市|地址|地点)[:：]?' + cities + '市?'));
+    const paired = compact.match(new RegExp(cities + '市?[·•/\\-]([\\u4e00-\\u9fa5]{1,5}(?:区|县|市))'));
+    let cityMatch = contextual || paired;
+    if (!cityMatch) {
+      const leading = compact.match(new RegExp('^' + cities + '市?'));
+      if (leading) {
+        const district = districtAfterCity(compact, leading[0].length);
+        if (compact === leading[0] || district) cityMatch = leading;
+      }
+    }
+    if (cityMatch) {
+      const city = normalizeCityName(cityMatch[1]);
+      const cityIndex = compact.indexOf(cityMatch[0]) + cityMatch[0].indexOf(cityMatch[1]);
+      const district = paired && paired[1] === city
+        ? validDistrict(paired[2])
+        : districtAfterCity(compact, cityIndex + cityMatch[1].length);
+      return { city: city, district: district };
+    }
+    const standalone = validDistrict(compact.replace(/^[·•：:]+|[·•：:]+$/g, ''));
+    return { city: '', district: standalone };
+  }
+
+  function extractLocationFacts(texts) {
+    const values = Array.isArray(texts) ? texts : [texts];
+    let city = '';
+    let district = '';
+    values.forEach(value => {
+      const location = extractLocationFact(value);
+      if (!city && location.city) city = location.city;
+      if (!district && location.district) district = location.district;
+    });
+    return {
+      city: city,
+      district: district,
+      citySource: city ? 'page' : '',
+      locationParseVersion: LOCATION_PARSE_VERSION
+    };
+  }
+
+  function applySearchCity(job, searchCity) {
+    const source = Object.assign({}, job || {});
+    const sourceKind = String(source.citySource || '');
+    const trusted = sourceKind === 'manual'
+      || (sourceKind === 'page' && Number(source.locationParseVersion) >= LOCATION_PARSE_VERSION);
+    if (trusted && normalizeCityName(source.city)) {
+      source.city = normalizeCityName(source.city);
+      source.district = validDistrict(source.district);
+      source.locationParseVersion = LOCATION_PARSE_VERSION;
+      return source;
+    }
+    const explicit = extractLocationFacts(source.rawLocationFacts || []);
+    if (explicit.city) {
+      return Object.assign(source, explicit);
+    }
+    const fallback = normalizeCityName(String(searchCity || '').split(/[\/、,，\s]+/)[0]);
+    source.city = fallback;
+    source.district = '';
+    source.citySource = fallback ? 'search' : '';
+    source.locationParseVersion = LOCATION_PARSE_VERSION;
+    return source;
+  }
+
+  function locationFrom(text) {
+    const location = extractLocationFacts(text);
+    return { city: location.city, district: location.district };
+  }
+
+  function publishedDaysAgoFrom(text) {
+    const source = String(text || '').replace(/\s+/g, '');
+    if (/刚刚发布|今日发布|今天发布|\d+小时前发布|发布于\d+小时前/.test(source)) return 0;
+    const match = source.match(/(?:发布于)?(\d+)天前(?:发布)?/);
+    return match ? Number(match[1]) : null;
+  }
+
   function extractFacts(texts) {
     const values = Array.isArray(texts) ? texts : [texts];
     let experience = '';
     let companySize = '';
+    let employmentType = '';
+    let education = '';
+    let salaryRange = null;
+    let city = '';
+    let district = '';
+    let publishedDaysAgo = null;
     values.forEach(value => {
       const text = normalizeText(value);
       if (!experience) experience = experienceFrom(text);
       if (!companySize) companySize = companySizeFrom(text);
+      if (!employmentType) employmentType = employmentTypeFrom(text);
+      if (!education) education = educationFrom(text);
+      if (!salaryRange) salaryRange = salaryRangeFrom(value);
+      const location = locationFrom(value);
+      if (!city && location.city) city = location.city;
+      if (!district && location.district) district = location.district;
+      if (publishedDaysAgo === null) publishedDaysAgo = publishedDaysAgoFrom(value);
     });
-    return { experience: experience, companySize: companySize };
+    return {
+      experience: experience,
+      companySize: companySize,
+      employmentType: employmentType,
+      education: education,
+      salaryRange: salaryRange,
+      city: city,
+      district: district,
+      publishedDaysAgo: publishedDaysAgo
+    };
   }
 
   function labelFor(kind, value) {
-    return kind === 'experience'
-      ? (EXPERIENCE_LABELS[value] || '未知')
-      : (COMPANY_SIZE_LABELS[value] || '未知');
+    const maps = {
+      experience: EXPERIENCE_LABELS,
+      companySize: COMPANY_SIZE_LABELS,
+      employmentType: EMPLOYMENT_TYPE_LABELS,
+      education: EDUCATION_LABELS
+    };
+    return (maps[kind] && maps[kind][value]) || '未知';
+  }
+
+  function includesTerm(text, term) {
+    return normalizeText(text).indexOf(normalizeText(term)) >= 0;
   }
 
   function evaluate(job, config) {
@@ -152,6 +473,83 @@
       else if (normalized.companySizeValues.indexOf(source.companySize) < 0) {
         failures.push('公司规模“' + labelFor('companySize', source.companySize) + '”不在所选范围');
       } else passes.push('公司规模：' + labelFor('companySize', source.companySize));
+    }
+
+    if (normalized.employmentTypeEnabled) {
+      if (!source.employmentType) missing.push('岗位类型信息缺失');
+      else if (normalized.employmentTypeValues.indexOf(source.employmentType) < 0) {
+        failures.push('岗位类型“' + labelFor('employmentType', source.employmentType) + '”不在所选范围');
+      } else passes.push('岗位类型：' + labelFor('employmentType', source.employmentType));
+    }
+
+    if (normalized.educationEnabled) {
+      if (!source.education) missing.push('学历要求信息缺失');
+      else if (normalized.educationValues.indexOf(source.education) < 0) {
+        failures.push('学历要求“' + labelFor('education', source.education) + '”不在所选范围');
+      } else passes.push('学历要求：' + labelFor('education', source.education));
+    }
+
+    if (normalized.salaryEnabled) {
+      const salary = source.salaryRange;
+      if (!salary || !Number.isFinite(Number(salary.minK)) || !Number.isFinite(Number(salary.maxK))) {
+        missing.push('薪资信息缺失');
+      } else if (Number(salary.maxK) < normalized.salaryMinK || Number(salary.minK) > normalized.salaryMaxK) {
+        failures.push('月薪范围“' + salary.minK + '–' + salary.maxK + 'K”与所选范围无交集');
+      } else passes.push('月薪范围：' + salary.minK + '–' + salary.maxK + 'K');
+    }
+
+    if (normalized.districtEnabled) {
+      if (!source.district) missing.push('行政区信息缺失');
+      else if (normalized.districtValues.indexOf(source.district) < 0) {
+        failures.push('行政区“' + source.district + '”不在所选范围');
+      } else passes.push('行政区：' + source.district);
+    }
+
+    if (normalized.city) {
+      if (!source.city) missing.push('城市信息缺失');
+      else if (normalizeText(source.city) !== normalizeText(normalized.city)) {
+        failures.push('城市“' + source.city + '”与目标城市“' + normalized.city + '”不一致');
+      } else passes.push('城市：' + source.city);
+    }
+
+    if (normalized.publishedTimeEnabled) {
+      const missingPublished = source.publishedDaysAgo === null
+        || source.publishedDaysAgo === undefined || source.publishedDaysAgo === '';
+      if (missingPublished) missing.push('发布时间信息缺失');
+      else if (Number(source.publishedDaysAgo) > normalized.publishedWithinDays) {
+        failures.push('岗位发布已超过 ' + normalized.publishedWithinDays + ' 天');
+      } else passes.push('发布时间：' + (Number(source.publishedDaysAgo) === 0 ? '当天' : source.publishedDaysAgo + ' 天前'));
+    }
+
+    const fullText = [source.name, source.jd].filter(Boolean).join('\n');
+    if (normalized.mustWordsEnabled) {
+      if (!fullText.trim()) missing.push('岗位文本信息缺失');
+      else {
+        const hits = normalized.mustWords.filter(term => includesTerm(fullText, term));
+        const matched = normalized.mustWordsMode === 'all'
+          ? hits.length === normalized.mustWords.length : hits.length > 0;
+        if (!matched) failures.push('必须包含词未满足（' + normalized.mustWords.join('、') + '）');
+        else passes.push('必须词命中：' + hits.join('、'));
+      }
+    }
+
+    if (normalized.excludeWordsEnabled) {
+      const excludeText = normalized.excludeWordsScope === 'title_jd'
+        ? fullText : String(source.name || '');
+      if (!excludeText.trim()) missing.push('排除词检查所需岗位文本缺失');
+      else {
+        const hits = normalized.excludeWords.filter(term => includesTerm(excludeText, term));
+        if (hits.length) failures.push('命中排除关键词：' + hits.join('、'));
+      }
+    }
+
+    if (normalized.companyBlacklistEnabled) {
+      if (!source.company) missing.push('公司名称信息缺失');
+      else {
+        const companyKey = normalizeCompany(source.company);
+        const blocked = normalized.companyBlacklist.find(company => normalizeCompany(company) === companyKey);
+        if (blocked) failures.push('公司位于黑名单：' + blocked);
+      }
     }
 
     if (failures.length) return { filterStatus: 'fail', filterReasons: failures };
@@ -179,9 +577,16 @@
   return {
     EXPERIENCE_OPTIONS: EXPERIENCE_OPTIONS,
     COMPANY_SIZE_OPTIONS: COMPANY_SIZE_OPTIONS,
+    EMPLOYMENT_TYPE_OPTIONS: EMPLOYMENT_TYPE_OPTIONS,
+    EDUCATION_OPTIONS: EDUCATION_OPTIONS,
     getDefaultConfig: getDefaultConfig,
     normalizeConfig: normalizeConfig,
+    splitTerms: splitTerms,
+    normalizeCompany: normalizeCompany,
     extractFacts: extractFacts,
+    extractLocationFacts: extractLocationFacts,
+    applySearchCity: applySearchCity,
+    LOCATION_PARSE_VERSION: LOCATION_PARSE_VERSION,
     labelFor: labelFor,
     evaluate: evaluate,
     confirmPending: confirmPending

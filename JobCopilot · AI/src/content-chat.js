@@ -1,4 +1,4 @@
-// ===== 聊天页 content script：打开会话 + 先发图片 + 再发招呼语 =====
+// ===== 聊天页 content script：AI 开场 → 固定补充消息 → 简历图片 =====
 (function () {
   if (window.__bossToudiChat) return;
   window.__bossToudiChat = true;
@@ -68,17 +68,26 @@
   }
 
   async function sendImage(image) {
-    if (!image) return true;
+    if (!image) return { ok: true, skipped: true };
     const input = findVisible(IMG_SELS) || document.querySelector('input[type=file]');
-    if (!input) return false;
+    if (!input) return { ok: false, err: '未找到图片上传入口' };
+    const before = ImageReceipt.capture(document, SELECTORS.chat.messageSent);
     const file = dataURLtoFile(image, 'resume.png');
     const dt = new DataTransfer();
     dt.items.add(file);
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'files').set;
     setter.call(input, dt.files);
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await sleep(2500);
-    return true;
+    for (let index = 0; index < 20; index++) {
+      await sleep(400);
+      const confirmed = ImageReceipt.findConfirmed(
+        ImageReceipt.collect(document, SELECTORS.chat.messageSent), before
+      );
+      if (confirmed) return { ok: true };
+      const failed = document.querySelector('.upload-fail, .upload-error, [class*="upload-fail"]');
+      if (failed && failed.offsetParent !== null) return { ok: false, err: '简历图片上传失败' };
+    }
+    return { ok: false, err: '简历图片发送未确认' };
   }
 
   function inputText(el) { return (el.isContentEditable || el.getAttribute('contenteditable') === 'true') ? (el.textContent || '') : (el.value || ''); }
@@ -110,9 +119,12 @@
     const before = document.querySelectorAll(SELECTORS.chat.messageSent).length;
     // 以回车为主发送
     pressEnter(input);
-    // 兜底：若有发送按钮也点一下
-    const btn = findVisible(SEND_SELS);
-    if (btn && !btn.classList.contains('disabled') && !btn.disabled) btn.click();
+    await sleep(500);
+    // 回车没有清空输入框时才使用发送按钮，避免重复发送
+    if (inputText(input).trim()) {
+      const btn = findVisible(SEND_SELS);
+      if (btn && !btn.classList.contains('disabled') && !btn.disabled) btn.click();
+    }
 
     // 验证：输入框被清空 或 新增自己消息气泡 => 成功
     for (let i = 0; i < 12; i++) {
@@ -127,11 +139,12 @@
   async function doSend(msg) {
     const oc = await openConversation(msg.company, msg.hrName, msg.position);
     if (!oc.ok) return { success: false, error: oc.err };
-    const imgOk = await sendImage(msg.image);
-    await sleep(800);
     const tr = await sendText(msg.greeting);
     if (!tr.ok) return { success: false, error: tr.err };
-    return { success: true, imageOk: imgOk };
+    await sleep(800);
+    const imageResult = await sendImage(msg.image);
+    if (!imageResult.ok) return { success: false, error: imageResult.err };
+    return { success: true };
   }
 
   // 发给当前已打开的会话（点继续沟通后跳进来的就是目标岗位，无需匹配）
@@ -143,20 +156,60 @@
       input = await waitVisible(INPUT_SELS, 6000);
     }
     if (!input) return { success: false, error: '未找到输入框｜' + dumpInputs() };
-    const imgOk = await sendImage(image);
-    await sleep(800);
     const tr = await sendText(greeting);
     if (!tr.ok) return { success: false, error: tr.err };
-    return { success: true, imageOk: imgOk };
+    await sleep(800);
+    const imageResult = await sendImage(image);
+    if (!imageResult.ok) return { success: false, error: imageResult.err };
+    return { success: true };
+  }
+
+  async function sendBundle(message) {
+    let input = await waitVisible(INPUT_SELS, 6000);
+    if (!input) {
+      const items = document.querySelectorAll(SELECTORS.chat.userList);
+      if (items[0]) { items[0].click(); await sleep(1500); }
+      input = await waitVisible(INPUT_SELS, 6000);
+    }
+    if (!input) return { success: false, stage: '打开会话', error: '未找到输入框｜' + dumpInputs() };
+
+    return MessageBundle.run(message, {
+      aiOpening: async value => {
+        const result = await sendText(String(value).trim());
+        if (result.ok) await sleep(900);
+        return result;
+      },
+      fixedMessage: async value => {
+        const result = await sendText(String(value).trim());
+        if (result.ok) await sleep(900);
+        return result;
+      },
+      resumeImage: value => sendImage(value)
+    });
   }
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === 'READ_CHAT_IDENTITY') {
+      try {
+        const identity = ChatPageIdentity.extract(document);
+        sendResponse({ success: true, status: identity.status, jobId: identity.jobId, ids: identity.ids });
+      } catch (error) {
+        sendResponse({ success: false, status: 'unknown', jobId: '', error: error.message });
+      }
+      return;
+    }
     if (msg.type === 'SEND') {
       doSend(msg).then(r => sendResponse(r)).catch(e => sendResponse({ success: false, error: e.message }));
       return true;
     }
     if (msg.type === 'SEND_ACTIVE') {
       sendActive(msg.image, msg.greeting).then(r => sendResponse(r)).catch(e => sendResponse({ success: false, error: e.message }));
+      return true;
+    }
+    if (msg.type === 'SEND_BUNDLE') {
+      sendBundle(msg).then(r => sendResponse(r)).catch(e => sendResponse({
+        success: false, stage: '发送', error: e.message
+      }));
       return true;
     }
   });

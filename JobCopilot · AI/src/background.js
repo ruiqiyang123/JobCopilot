@@ -1,56 +1,100 @@
-// ===== BOSS自动投递 Service Worker：编排 收集→筛选→审核→投递 + 可配置 LLM =====
+// ===== JobCopilot Service Worker：收集 → 完整 JD 筛选 → 人工批准 → 三段式投递 =====
 importScripts(
-  '/src/selectors.js', '/src/job-filters.js', '/src/workflow-safety.js',
-  '/src/job-tracker.js', '/src/llm-client.js'
+  '/src/selectors.js', '/src/job-filters.js', '/src/job-detail.js',
+  '/src/detail-readiness.js', '/src/model-retry.js',
+  '/src/greeting-plans.js', '/src/review-workflow.js', '/src/batch-lifecycle.js', '/src/search-strategy.js',
+  '/src/match-scoring.js',
+  '/src/workflow-safety.js',
+  '/src/job-tracker.js', '/src/chat-navigation.js', '/src/chat-page-identity.js', '/src/contact-retry.js',
+  '/src/storage-utils.js', '/src/llm-client.js'
 );
 
 const CFG_KEYS = [
   'llmProvider', 'llmApiKey', 'llmBaseUrl', 'llmModel', 'llmAuthType', 'dsKey',
-  'resumeText', 'resumeImage', 'city', 'keyword', 'count', 'jobFilterConfig'
+  'resumeText', 'resumeImage', 'city', 'keyword', 'count', 'jobFilterConfig',
+  'searchMatchMode', 'keywordExpansionEnabled', 'greetingPlansState'
 ];
 
 let state = {
   phase: 'idle', paused: false, aborted: false,
-  jobs: [], screened: [], greetings: {}, results: [], processed: {},
-  previews: {}, lastBatch: null, trackerRecords: []
+  jobs: [], screened: [], results: [], processed: {},
+  previews: {}, lastBatch: null, trackerRecords: [],
+  greetingPlansState: null
 };
+const quickScreeningTasks = new Set();
+const detailedScoringTasks = new Set();
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 });
-try { chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {}); } catch (e) {}
+try { chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {}); } catch (error) {}
 
-// ── 小工具 ──
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// ── 通用工具 ──
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const rand = (a, b) => sleep(a + Math.random() * (b - a));
 function log(text, level) { chrome.runtime.sendMessage({ type: 'LOG', text: text, level: level || 'info' }).catch(() => {}); }
 function pushPhase() { chrome.runtime.sendMessage({ type: 'PHASE', phase: state.phase }).catch(() => {}); }
 function progress(cur, total, label) { chrome.runtime.sendMessage({ type: 'PROGRESS', cur: cur, total: total, label: label || '' }).catch(() => {}); }
 async function waitIfPaused() { while (state.paused && !state.aborted) await sleep(400); }
+function resumeFull(cfg) { return String(cfg.resumeText || '').trim(); }
+function findJob(id) { return state.jobs.find(job => job.id === id) || null; }
+function findScreened(id) { return state.screened.find(job => job.id === id) || null; }
+
+function isGlobalBlockingError(error) {
+  if (DetailReadiness.isGlobal(error)) return true;
+  const text = String((error && error.message) || error || '');
+  return /登录已失效|安全验证|人机验证|访问异常|订阅回复弹窗重复出现/.test(text);
+}
+
+async function storageSet(values) {
+  try { await chrome.storage.local.set(values); }
+  catch (error) { throw StorageUtils.toUserError(error); }
+}
+
 async function getCfg() {
   const stored = await chrome.storage.local.get(CFG_KEYS);
   const migrated = LLMClient.migrateStoredConfig(stored);
-  if (Object.keys(migrated).length) await chrome.storage.local.set(migrated);
-  return Object.assign({}, stored, migrated);
-}
-function resumeFull(cfg) { return (cfg.resumeText || '').trim(); }
-function jobInfo(j) {
-  return '岗位：' + (j.name || '')
-    + '\n技能标签：' + ((j.tags || []).join('、'))
-    + '\n薪资：' + (j.salary || '')
-    + '\n公司：' + (j.company || '')
-    + '\n工作经验：' + JobFilters.labelFor('experience', j.experience)
-    + '\n公司规模：' + JobFilters.labelFor('companySize', j.companySize);
-}
-function findJob(id) { for (var i = 0; i < state.jobs.length; i++) if (state.jobs[i].id === id) return state.jobs[i]; return null; }
-function hardFilterJob(job, cfg) {
-  return Object.assign({}, job, JobFilters.evaluate(job, cfg.jobFilterConfig));
-}
-function blockedScreenResult(job) {
-  const prefix = job.filterStatus === 'pending' ? '待人工确认：' : '硬筛选排除：';
-  return Object.assign({}, job, { match: false, reason: prefix + (job.filterReasons || []).join('；') });
+  if (Object.keys(migrated).length) await storageSet(migrated);
+  const config = Object.assign({}, stored, migrated);
+  config.greetingPlansState = GreetingPlans.normalizeState(config.greetingPlansState, {
+    resumeImage: config.resumeImage || ''
+  });
+  state.greetingPlansState = config.greetingPlansState;
+  return config;
 }
 
+function selectedGreetingPlan(cfg) {
+  const source = (cfg && cfg.greetingPlansState) || state.greetingPlansState;
+  return GreetingPlans.selectedPlan(source);
+}
+
+function jobInfo(job) {
+  return '岗位：' + (job.name || '')
+    + '\n公司：' + (job.company || '')
+    + '\n薪资：' + (job.salary || '')
+    + '\n工作经验：' + JobFilters.labelFor('experience', job.experience)
+    + '\n公司规模：' + JobFilters.labelFor('companySize', job.companySize)
+    + '\n岗位类型：' + JobFilters.labelFor('employmentType', job.employmentType)
+    + '\n学历要求：' + JobFilters.labelFor('education', job.education)
+    + '\n工作地点：' + [job.city, job.district].filter(Boolean).join('·')
+    + '\n发布时间：' + (job.publishedDaysAgo === 0 ? '当天' : (job.publishedDaysAgo ? job.publishedDaysAgo + ' 天前' : '未知'))
+    + '\n完整 JD：\n' + String(job.jd || '').slice(0, 8000);
+}
+
+function hardFilterJob(job, cfg) {
+  const located = JobFilters.applySearchCity(job, cfg.city);
+  return Object.assign({}, located, JobFilters.evaluate(located, cfg.jobFilterConfig));
+}
+
+function blockedScreenResult(job) {
+  const prefix = job.filterStatus === 'pending' ? '待人工补充：' : '硬筛选排除：';
+  return ReviewWorkflow.normalizeJob(Object.assign({}, job, {
+    match: false,
+    reason: prefix + (job.filterReasons || []).join('；')
+  }));
+}
+
+// ── 岗位进度 ──
 async function hydrateTrackerRecords() {
   if (state.trackerRecords.length) return state.trackerRecords;
   const saved = await chrome.storage.local.get('jobTrackerRecords');
@@ -59,7 +103,7 @@ async function hydrateTrackerRecords() {
 }
 
 async function persistTrackerRecords() {
-  await chrome.storage.local.set({ jobTrackerRecords: state.trackerRecords });
+  await storageSet({ jobTrackerRecords: state.trackerRecords });
   chrome.runtime.sendMessage({
     type: 'TRACKER_UPDATED',
     records: state.trackerRecords,
@@ -89,7 +133,7 @@ async function markTrackerContacted(job) {
   await persistTrackerRecords();
 }
 
-// ── 可配置模型 ──
+// ── 模型 ──
 function llmConfigFrom(cfg) {
   return {
     provider: cfg.llmProvider,
@@ -99,39 +143,91 @@ function llmConfigFrom(cfg) {
     authType: cfg.llmAuthType
   };
 }
+
 function providerNameFrom(cfg) {
   try { return LLMClient.normalizeConfig(llmConfigFrom(cfg)).providerName; }
   catch (error) { return 'AI'; }
 }
+
 async function callLLM(cfg, messages, options) {
   return LLMClient.call(llmConfigFrom(cfg), messages, options);
 }
 
-// 筛选：只判断是否值得投（用岗位标签快速判断，不生成招呼语）
 async function screenJob(cfg, job) {
-  const sys = '你是资深求职助手。请完全依据下面提供的【求职者简历】，判断某个岗位是否值得该求职者投递。\n【判断标准·适中】保留(match=true)：岗位方向与求职者简历的专业/技能/经历相关，且求职者的经验年限、学历、级别够得着该岗位（不超纲）。剔除(match=false)：方向与简历明显无关；岗位要求的经验/学历/硬技能明显超出简历；岗位级别明显高于求职者当前水平。请依据简历本身判断，不要套用任何固定行业或级别。\n【输出】只输出一个JSON对象，不要markdown：{"match":true或false,"reason":"一句话理由"}';
-  const user = '求职者简历：\n' + resumeFull(cfg) + '\n\n待判断岗位：\n' + jobInfo(job) + '\n\n严格输出JSON。';
-  const raw = await callLLM(cfg, [{ role: 'system', content: sys }, { role: 'user', content: user }], {
-    maxTokens: 200,
-    temperature: 0.5,
-    jsonMode: true
-  });
-  let p = null;
-  try { p = JSON.parse(raw); } catch (e) { const m = raw && raw.match(/\{[\s\S]*\}/); if (m) { try { p = JSON.parse(m[0]); } catch (e2) {} } }
-  if (!p) return { match: false, reason: 'AI解析失败' };
-  return { match: p.match === true, reason: p.reason || '' };
+  const system = '你是 AI 产品岗位招聘筛选助手。只能依据求职者简历与完整 JD，禁止虚构。'
+    + '只判断是否值得进入人工审核，输出极简 JSON，不要 Markdown：'
+    + '{"decision":"recommended|needs_info|excluded","reason":"一句话理由"}。'
+    + 'recommended 表示方向和主要证据匹配；needs_info 表示证据不足或需要人工判断；'
+    + 'excluded 表示方向或核心要求明确不匹配。';
+  const user = '求职者简历：\n' + resumeFull(cfg)
+    + '\n\n待筛选岗位：\n' + jobInfo(job)
+    + '\n\n只输出 decision 和 reason。';
+  const raw = await callLLM(cfg, [
+    { role: 'system', content: system },
+    { role: 'user', content: user }
+  ], { maxTokens: 180, temperature: 0.1, jsonMode: true, timeoutMs: 20000 });
+  return MatchScoring.toQuickJobResult(MatchScoring.validateQuick(raw));
 }
 
-// 投递时：结合该岗位的【完整JD】+ 简历，现场生成专属招呼语
-async function genGreetingFromJD(cfg, job, jd) {
-  const sys = '你是求职者本人，在BOSS直聘给HR发招呼语。回复会原样发给HR，严禁任何注释、说明、括号备注、字数统计或引导语。\n【格式】1.开头前15字必须是"熟悉XXX、XXX"(填该JD要求且你简历具备的核心技能1-2个)。2.紧接"做过XXX"说明简历里与该岗位相关的具体项目/经历。3.全文80-120字，真诚自然。';
-  const jdText = (jd && jd.trim()) ? jd.trim() : ('技能标签：' + (job.tags || []).join('、'));
-  const user = '我的简历：\n' + resumeFull(cfg) + '\n\n目标岗位：' + (job.name || '') + (job.company ? ('（' + job.company + '）') : '') + '\n该岗位JD：\n' + jdText + '\n\n请按格式生成一段招呼语，开头必须"熟悉…"，直接输出招呼语本身，不要任何多余内容。';
-  const raw = await callLLM(cfg, [{ role: 'system', content: sys }, { role: 'user', content: user }], {
-    maxTokens: 300,
-    temperature: 0.5
-  });
-  return (raw || '').trim();
+async function scoreJobDetailed(cfg, job) {
+  const system = '你是资深 AI 产品招聘经理。只能依据求职者简历事实与岗位完整 JD 评分，禁止虚构。'
+    + '按六个维度评分：岗位方向 30、工作年限 15、产品基本功 20、AI 经历 20、学历背景 5、行业/领域经验 10。'
+    + '每个 evidence 必须明确引用 JD 或简历中的真实证据；总分必须严格等于六个分项之和。'
+    + '只输出 JSON，不要 Markdown：'
+    + '{"score":0,"dimensions":{'
+    + '"roleDirection":{"score":0,"max":30,"evidence":""},'
+    + '"experience":{"score":0,"max":15,"evidence":""},'
+    + '"productFundamentals":{"score":0,"max":20,"evidence":""},'
+    + '"aiExperience":{"score":0,"max":20,"evidence":""},'
+    + '"education":{"score":0,"max":5,"evidence":""},'
+    + '"domain":{"score":0,"max":10,"evidence":""}},'
+    + '"strengths":[""],"risks":[""],"reason":""}。';
+  const user = '求职者简历：\n' + resumeFull(cfg) + '\n\n待评分岗位：\n' + jobInfo(job)
+    + '\n\n严格根据证据评分并输出指定 JSON。';
+  const raw = await callLLM(cfg, [
+    { role: 'system', content: system },
+    { role: 'user', content: user }
+  ], { maxTokens: 1100, temperature: 0.2, jsonMode: true });
+  return MatchScoring.toJobResult(MatchScoring.validate(raw, cfg.searchMatchMode || 'balanced'));
+}
+
+async function generateAiOpening(cfg, plan, job, jd, timeoutMs) {
+  const system = '你是求职者本人，正在 BOSS 直聘给 HR 发送第一条个性化开场。'
+    + '内容会原样发送，禁止注释、标题、字数说明或虚构经历。\n'
+    + '用户规则：' + plan.aiInstruction;
+  const user = '我的简历：\n' + resumeFull(cfg)
+    + '\n\n目标岗位：' + (job.name || '') + (job.company ? '（' + job.company + '）' : '')
+    + '\n完整 JD：\n' + String(jd || job.jd || '').slice(0, 8000)
+    + '\n\n直接输出一段适合 BOSS 聊天的开场文字。';
+  const raw = await callLLM(cfg, [
+    { role: 'system', content: system },
+    { role: 'user', content: user }
+  ], { maxTokens: 420, temperature: 0.45, timeoutMs: Number(timeoutMs) || 30000 });
+  return String(raw || '').trim();
+}
+
+async function generateAiOpeningWithRetry(cfg, plan, job, jd) {
+  const timeouts = [30000, 45000];
+  let lastError = null;
+  for (let attempt = 0; attempt < ModelRetry.MAX_ATTEMPTS; attempt++) {
+    try {
+      return await generateAiOpening(cfg, plan, job, jd, timeouts[attempt]);
+    } catch (error) {
+      lastError = error;
+      if (!ModelRetry.shouldRetry(error, attempt)) {
+        if (attempt === ModelRetry.MAX_ATTEMPTS - 1 && /模型请求超时/.test(error.message || '')) {
+          throw new Error('AI 开场两次请求均超时');
+        }
+        throw error;
+      }
+      log('AI 开场生成超时，自动重试 1/1', 'warn');
+      await sleep(1000);
+    }
+  }
+  if (lastError && /模型请求超时/.test(lastError.message || '')) {
+    throw new Error('AI 开场两次请求均超时');
+  }
+  throw lastError || new Error('AI 个性化开场生成失败');
 }
 
 async function testLLMConnection(config) {
@@ -148,183 +244,1100 @@ async function testLLMConnection(config) {
   };
 }
 
-// ── tab 注入 + 发消息 ──
+// ── 标签页与内容脚本 ──
+function waitTabComplete(tabId, timeoutMs) {
+  const timeout = Number(timeoutMs) || 20000;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => finish(new Error('页面加载超时，请检查网络或重新登录 BOSS')), timeout);
+    function finish(error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      chrome.tabs.onUpdated.removeListener(listener);
+      if (error) reject(error);
+      else setTimeout(resolve, 1000);
+    }
+    function listener(id, info) {
+      if (id === tabId && info.status === 'complete') {
+        finish();
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId, tab => {
+      if (chrome.runtime.lastError) return finish(new Error(chrome.runtime.lastError.message));
+      if (tab && tab.status === 'complete') finish();
+    });
+  });
+}
+
+function sendToTab(tabId, message, timeoutMs) {
+  const timeout = Number(timeoutMs) || 12000;
+  return new Promise(resolve => {
+    let settled = false;
+    const timeoutId = setTimeout(() => finish({
+      success: false,
+      error: '页面脚本响应超时，请刷新扩展后重试'
+    }), timeout);
+    function finish(response) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      resolve(response);
+    }
+    chrome.tabs.sendMessage(tabId, message, response => {
+      if (chrome.runtime.lastError) finish({ success: false, error: chrome.runtime.lastError.message });
+      else finish(response || { success: false, error: '页面脚本没有响应' });
+    });
+  });
+}
+
 async function ensureInjected(tabId, file) {
+  const files = file === 'src/content-chat.js'
+    ? ['src/selectors.js', 'src/message-bundle.js', 'src/image-receipt.js', 'src/chat-page-identity.js', 'src/content-chat.js']
+    : [
+      'src/selectors.js', 'src/job-filters.js', 'src/job-detail.js', 'src/detail-readiness.js',
+      'src/contact-interstitial.js', 'src/content-search.js'
+    ];
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tabId },
-      files: ['src/selectors.js', 'src/job-filters.js', file]
-    });
-  } catch (e) {}
+    await chrome.scripting.executeScript({ target: { tabId: tabId }, files: files });
+    return true;
+  } catch (error) { return false; }
 }
-function sendToTab(tabId, msg) {
-  return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, msg, (resp) => {
-      if (chrome.runtime.lastError) resolve({ success: false, error: chrome.runtime.lastError.message });
-      else resolve(resp || { success: false, error: 'no response' });
-    });
-  });
-}
-function waitTabComplete(tabId) {
-  return new Promise((resolve) => {
-    function lis(id, info) { if (id === tabId && info.status === 'complete') { chrome.tabs.onUpdated.removeListener(lis); setTimeout(resolve, 1200); } }
-    chrome.tabs.onUpdated.addListener(lis);
-    chrome.tabs.get(tabId, (t) => { if (t && t.status === 'complete') { chrome.tabs.onUpdated.removeListener(lis); setTimeout(resolve, 1200); } });
-  });
-}
+
 function resolveCity(cfg) {
-  const firstCity = (cfg.city || '').split(/[\/、,，\s]+/)[0].replace(/[市省]$/, '') || '';
+  const firstCity = String(cfg.city || '').split(/[\/、,，\s]+/)[0].replace(/[市省]$/, '') || '';
   const code = (typeof CITY_MAP !== 'undefined' && CITY_MAP[firstCity]) || '100010000';
   return { name: firstCity, code: code, found: code !== '100010000' || firstCity === '全国' };
 }
-function buildSearchUrl(cfg) {
-  const c = resolveCity(cfg);
-  const params = new URLSearchParams({ query: cfg.keyword || '', city: c.code });
-  // 行业/规模：BOSS 代码不确定，暂不加入（错误代码会导致搜不到任何岗位）
-  return 'https://www.zhipin.com/web/geek/jobs?' + params.toString();
+
+function buildSearchUrl(cfg, keyword) {
+  const city = resolveCity(cfg);
+  return 'https://www.zhipin.com/web/geek/jobs?' + new URLSearchParams({
+    query: keyword || cfg.keyword || '', city: city.code
+  }).toString();
 }
-async function ensureTab(url) {
-  let tabs = await chrome.tabs.query({ url: '*://*.zhipin.com/*' });
+
+async function getSearchTab(cfg, keyword) {
+  const url = buildSearchUrl(cfg, keyword);
+  const tabs = await chrome.tabs.query({ url: '*://*.zhipin.com/web/geek/jobs*' });
   let tab = tabs[0];
-  if (!tab) tab = await chrome.tabs.create({ url: url });
-  else await chrome.tabs.update(tab.id, { url: url });
+  if (!tab) tab = await chrome.tabs.create({ url: url, active: true });
+  else tab = await chrome.tabs.update(tab.id, { url: url, active: true });
   await waitTabComplete(tab.id);
-  await sleep(2000);
+  await sleep(1200);
   return tab;
 }
-async function getSearchTab(cfg) { return ensureTab(buildSearchUrl(cfg)); }
-function curUrl(tabId) { return new Promise(res => chrome.tabs.get(tabId, t => res((t && t.url) || ''))); }
 
-// ── 流程：收集 + 筛选 ──
-async function runCollect() {
-  state.aborted = false; state.paused = false;
-  state.jobs = []; state.screened = []; state.greetings = {}; state.results = [];
-  state.previews = {}; state.lastBatch = null;
-  state.phase = 'collecting'; pushPhase();
-  const cfg = await getCfg();
-  if (!cfg.llmApiKey) { log('请先填写 AI 模型 API Key', 'error'); state.phase = 'idle'; pushPhase(); return; }
-  if (!cfg.keyword) { log('请先填写岗位关键词', 'error'); state.phase = 'idle'; pushPhase(); return; }
-  if (!(cfg.resumeText || '').trim()) { log('请先在设置里填写"简历文字"（AI筛选和招呼语都需要它）', 'error'); state.phase = 'idle'; pushPhase(); return; }
-
-  const _c = resolveCity(cfg);
-  log('打开搜索页：' + cfg.keyword + ' | 城市：' + (_c.found ? _c.name : '全国'));
-  if (cfg.city && !_c.found) log('城市"' + cfg.city + '"未识别，已按全国搜索', 'warn');
-  const tab = await getSearchTab(cfg);
-  const count = parseInt(cfg.count) || 20;
-
-  log('收集岗位中（目标 ' + count + ' 个）...');
-  await ensureInjected(tab.id, 'src/content-search.js');
-  const r = await sendToTab(tab.id, { type: 'SCRAPE', count: count });
-  if (!r || !r.success) { log('收集失败：' + (r && r.error), 'error'); state.phase = 'idle'; pushPhase(); return; }
-  try {
-    JobFilters.normalizeConfig(cfg.jobFilterConfig);
-  } catch (error) {
-    log(error.message, 'error'); state.phase = 'idle'; pushPhase(); return;
-  }
-  state.jobs = (r.jobs || []).map(job => hardFilterJob(job, cfg));
-  await trackCollectedJobs(state.jobs);
-  log('收集到 ' + state.jobs.length + ' 个岗位', 'success');
-  if (!state.jobs.length) { state.phase = 'idle'; pushPhase(); return; }
-
-  // 硬筛选先于 AI：不匹配和信息不完整的岗位不会消耗模型额度
-  state.phase = 'screening'; pushPhase();
-  const eligibleJobs = state.jobs.filter(job => job.filterStatus === 'pass');
-  const blockedJobs = state.jobs.filter(job => job.filterStatus !== 'pass');
-  state.screened = blockedJobs.map(blockedScreenResult);
-  log('硬筛选：通过 ' + eligibleJobs.length + '，排除 '
-    + blockedJobs.filter(job => job.filterStatus === 'fail').length + '，待确认 '
-    + blockedJobs.filter(job => job.filterStatus === 'pending').length);
-  log('AI 筛选中（' + providerNameFrom(cfg) + '）...');
-  let done = blockedJobs.length; const total = state.jobs.length;
-  progress(done, total, '筛选');
-  const CONC = 3;
-  for (let i = 0; i < eligibleJobs.length; i += CONC) {
-    if (state.aborted) break; await waitIfPaused();
-    const batch = eligibleJobs.slice(i, i + CONC);
-    await Promise.all(batch.map(async (job) => {
-      let res;
-      try { res = await screenJob(cfg, job); }
-      catch (e) { res = { match: false, reason: '筛选异常:' + e.message }; }
-      state.screened.push(Object.assign({}, job, { match: res.match, reason: res.reason }));
-      done++; progress(done, total, '筛选');
-    }));
-  }
-  const matched = state.screened.filter(j => j.match).length;
-  log('筛选完成：匹配 ' + matched + ' / ' + total, 'success');
-  // 存盘：SW 可能在审核期间被浏览器回收，投递时需从存储读回
-  await chrome.storage.local.set({
-    sw_jobs: state.jobs,
-    sw_greetings: state.greetings,
-    sw_screened: state.screened,
-    sw_previews: {},
-    lastBatch: null
-  });
-  state.phase = 'review'; pushPhase();
-  chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
+async function createDetailTab(detailUrl, active) {
+  const url = JobDetail.canonicalizeDetailUrl(detailUrl);
+  if (!url) throw new Error('岗位详情链接缺失或无效');
+  return chrome.tabs.create({ url: url, active: active === true });
 }
 
-async function confirmFilterPending(jobId) {
-  if (!state.jobs.length || !state.screened.length) {
-    const saved = await chrome.storage.local.get(['sw_jobs', 'sw_screened']);
-    state.jobs = saved.sw_jobs || [];
-    state.screened = saved.sw_screened || [];
+async function removeTab(tabId) {
+  if (!tabId) return;
+  try { await chrome.tabs.remove(tabId); } catch (error) {}
+}
+
+async function removeTabs(tabIds) {
+  const unique = Array.from(new Set((tabIds || []).filter(Boolean)));
+  for (const tabId of unique) await removeTab(tabId);
+}
+
+function normalizeDetailResult(detail, job, cfg) {
+  if (!detail || !detail.success || !detail.currentJob) {
+    throw new Error((detail && detail.error) || '无法读取岗位详情');
   }
-  const cfg = await getCfg();
-  const index = state.jobs.findIndex(job => job.id === jobId);
-  if (index < 0) throw new Error('找不到待确认岗位');
+  const jd = String(detail.jd || detail.currentJob.jd || '').trim();
+  if (!jd) throw new Error('完整 JD 缺失');
+  const currentJob = JobFilters.applySearchCity(Object.assign({}, detail.currentJob, { jd: jd }), cfg.city);
+  const identity = JobDetail.verifyIdentity(job, currentJob);
+  if (!identity.ok) throw new Error('身份校验失败：' + identity.reasons.join('；'));
+  return Object.assign({}, detail, { jd: jd, currentJob: currentJob });
+}
 
-  const confirmed = JobFilters.confirmPending(state.jobs[index], cfg.jobFilterConfig);
-  let aiResult;
-  try { aiResult = await screenJob(cfg, confirmed); }
-  catch (error) { aiResult = { match: false, reason: '筛选异常:' + error.message }; }
+async function readDetailFromTab(tabId, job, cfg) {
+  const detail = await sendToTab(tabId, { type: 'READ_DETAIL' });
+  return normalizeDetailResult(detail, job, cfg);
+}
 
-  state.jobs[index] = confirmed;
-  const screenedJob = Object.assign({}, confirmed, {
-    match: aiResult.match,
-    reason: (confirmed.filterReasons || []).join('；') + '；AI：' + aiResult.reason
+async function waitForDetailReady(tabId, job, cfg, timeoutMs) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 20000);
+  let lastCode = 'detail_loading';
+  while (Date.now() < deadline) {
+    if (state.aborted) {
+      const cancelled = new Error('任务已停止');
+      cancelled.code = 'cancelled';
+      throw cancelled;
+    }
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (!tab) throw DetailReadiness.error('tab_network_error');
+    } catch (error) {
+      if (error && error.code === 'cancelled') throw error;
+      lastCode = 'tab_network_error';
+      await sleep(500);
+      continue;
+    }
+
+    const injected = await ensureInjected(tabId, 'src/content-search.js');
+    if (!injected) {
+      lastCode = 'script_unavailable';
+      await sleep(500);
+      continue;
+    }
+
+    const response = await sendToTab(tabId, { type: 'READ_DETAIL_STATUS' }, 3000);
+    const code = DetailReadiness.classify(response);
+    lastCode = code;
+    if (code === 'ready') {
+      try {
+        return normalizeDetailResult(response, job, cfg);
+      } catch (error) {
+        const identityError = error || new Error('岗位详情身份校验失败');
+        identityError.code = 'identity_mismatch';
+        identityError.retryable = false;
+        throw identityError;
+      }
+    }
+    if (code !== 'detail_loading') {
+      throw DetailReadiness.error(code, response && response.error);
+    }
+    await sleep(600);
+  }
+  const code = DetailReadiness.shouldRetry(lastCode) ? 'detail_timeout' : lastCode;
+  throw DetailReadiness.error(code);
+}
+
+async function openDetailWithRetry(job, cfg, active) {
+  let lastError = null;
+  const timeouts = [20000, 35000];
+  for (let attempt = 0; attempt < timeouts.length; attempt++) {
+    let tab = null;
+    try {
+      tab = await createDetailTab(job.detailUrl, active === true);
+      const detail = await waitForDetailReady(tab.id, job, cfg, timeouts[attempt]);
+      return { tab: tab, detail: detail, temporary: true, detailAttempts: attempt + 1 };
+    } catch (error) {
+      lastError = error && error.code
+        ? error
+        : DetailReadiness.error('tab_network_error', (error && error.message) || '岗位详情页网络加载失败');
+      if (tab) await removeTab(tab.id);
+      if (attempt === 0 && DetailReadiness.shouldRetry(lastError)) {
+        log('岗位详情加载较慢，自动重试 1/1', 'warn');
+        await rand(1000, 1600);
+        continue;
+      }
+      throw lastError;
+    }
+  }
+  throw lastError || DetailReadiness.error('detail_timeout');
+}
+
+async function readJobDetail(job, cfg) {
+  if (job.detailUrl) {
+    let opened = null;
+    try {
+      opened = await openDetailWithRetry(job, cfg, false);
+      return opened.detail;
+    } finally {
+      if (opened && opened.tab) await removeTab(opened.tab.id);
+    }
+  }
+
+  const searchTab = await getSearchTab(cfg);
+  await ensureInjected(searchTab.id, 'src/content-search.js');
+  const detail = await sendToTab(searchTab.id, { type: 'OPEN_JD', job: job });
+  if (!detail || !detail.success || !detail.currentJob) {
+    throw new Error((detail && detail.error) || '详情链接缺失，搜索页也未找到岗位');
+  }
+  return normalizeDetailResult(detail, job, cfg);
+}
+
+async function openJobForDelivery(job, cfg) {
+  if (job.detailUrl) {
+    return openDetailWithRetry(job, cfg, false);
+  }
+  const tab = await getSearchTab(cfg);
+  await ensureInjected(tab.id, 'src/content-search.js');
+  const detail = await sendToTab(tab.id, { type: 'OPEN_JD', job: job });
+  if (!detail || !detail.success || !detail.currentJob) {
+    throw new Error((detail && detail.error) || '无法读取岗位详情');
+  }
+  return { tab: tab, detail: normalizeDetailResult(detail, job, cfg), temporary: false };
+}
+
+async function readChatPageIdentity(tabId) {
+  const injected = await ensureInjected(tabId, 'src/content-chat.js');
+  if (!injected) return { status: 'unknown', jobId: '' };
+  const response = await sendToTab(tabId, { type: 'READ_CHAT_IDENTITY' }, 3000);
+  if (!response || !response.success) return { status: 'unknown', jobId: '' };
+  return {
+    status: response.status || 'unknown',
+    jobId: response.jobId || '',
+    ids: Array.isArray(response.ids) ? response.ids : []
+  };
+}
+
+function chatIdentityError(result) {
+  const error = new Error((result && result.reason) || '聊天页无法确认对应岗位，当前岗位未发送');
+  if (result && /缺少岗位 ID/.test(result.reason || '')) error.code = 'missing_job_id';
+  else error.code = 'job_mismatch';
+  return error;
+}
+
+async function establishChatPage(opened, job, temporaryTabIds) {
+  const before = await chrome.tabs.query({});
+  let pageFallbackLogged = false;
+  const observer = ChatNavigation.observe(chrome.tabs, {
+    sourceTabId: opened.tab.id,
+    expectedJobId: job.id,
+    existingTabIds: before.map(tab => tab.id),
+    timeoutMs: 30000,
+    missingJobIdGraceMs: 12000,
+    pollIntervalMs: 250,
+    resolvePageJobId: async tabId => {
+      if (!pageFallbackLogged) {
+        pageFallbackLogged = true;
+        log('聊天 URL 缺少岗位 ID，正在读取页面职位卡片', 'info');
+      }
+      return readChatPageIdentity(tabId);
+    },
+    isCancelled: () => state.aborted
   });
-  const screenedIndex = state.screened.findIndex(job => job.id === jobId);
-  if (screenedIndex >= 0) state.screened[screenedIndex] = screenedJob;
-  else state.screened.push(screenedJob);
+  try {
+    log('正在点击沟通并等待对应岗位聊天页', 'info');
+    const command = sendToTab(opened.tab.id, { type: 'GO_CHAT', job: job }, 15000);
+    const destination = await ChatNavigation.coordinate(command, observer, () => {
+      log('详情页跳转中，已忽略瞬时消息通道关闭', 'info');
+    });
+    if (!destination || !destination.tab || !destination.tab.id) {
+      throw new Error('未找到对应岗位聊天页');
+    }
+    if (destination.created) temporaryTabIds.add(destination.tab.id);
+    let chatTab = await chrome.tabs.get(destination.tab.id);
+    let pageJobId = destination.identitySource === 'page' ? destination.jobId : '';
+    let identity = ChatNavigation.matchChatIdentity(
+      chatTab.url || destination.tab.url || '', job.id, pageJobId
+    );
+    if (!identity.ok) throw chatIdentityError(identity);
+    await sleep(600);
+    chatTab = await chrome.tabs.get(chatTab.id);
+    if (!ChatNavigation.parseChatUrl(chatTab.url || '').jobId && pageJobId) {
+      const refreshed = await readChatPageIdentity(chatTab.id);
+      pageJobId = refreshed.status === 'confirmed' ? refreshed.jobId : '';
+    }
+    identity = ChatNavigation.matchChatIdentity(chatTab.url || '', job.id, pageJobId);
+    if (!identity.ok) throw chatIdentityError(identity);
+    if (identity.identitySource === 'page') {
+      log('聊天页岗位身份已通过页面职位卡片确认', 'success');
+    }
+    log('已进入对应岗位聊天页', 'success');
+    return { tab: chatTab, created: destination.created, relation: destination.relation };
+  } catch (error) {
+    if (error && error.created && error.tabId) temporaryTabIds.add(error.tabId);
+    observer.cancel();
+    throw error;
+  }
+}
 
-  await chrome.storage.local.set({ sw_jobs: state.jobs, sw_screened: state.screened });
-  chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
-  return { screened: state.screened, job: screenedJob };
+// ── 持久化与迁移 ──
+async function persistReviewState() {
+  state.previews = ReviewWorkflow.stripEmbeddedImages(state.previews);
+  await storageSet({
+    sw_jobs: state.jobs,
+    sw_screened: state.screened,
+    sw_previews: state.previews,
+    lastBatch: state.lastBatch,
+    greetingPlansState: state.greetingPlansState,
+    processed: state.processed
+  });
+}
+
+function broadcastDeliveryState() {
+  chrome.runtime.sendMessage({
+    type: 'DELIVERY_STATE_UPDATED',
+    screened: state.screened,
+    lastBatch: state.lastBatch
+  }).catch(() => {});
+}
+
+function migrateDeliveryState() {
+  state.jobs = BatchLifecycle.migrate(state.jobs, state.processed, state.lastBatch);
+  state.screened = BatchLifecycle.migrate(state.screened, state.processed, state.lastBatch);
+}
+
+function recoverInterruptedLiveBatch() {
+  const batch = state.lastBatch;
+  if (!batch || batch.mode !== 'live' || batch.status !== 'running') return false;
+  const jobId = String(batch.currentJobId || '');
+  if (batch.currentStep !== 'send_bundle' || !jobId || state.processed[jobId]) return false;
+  const message = '上次发送过程被中断，结果不明确，请先检查 BOSS 会话后再决定是否重试';
+  batch.status = 'failed';
+  batch.finishedAt = Date.now();
+  batch.failed = Array.isArray(batch.failed) ? batch.failed : [];
+  if (!batch.failed.some(item => item && item.id === jobId)) {
+    batch.failed.push({ id: jobId, step: 'send_bundle', sendStarted: true, error: message });
+  }
+  const settled = new Set((batch.succeeded || []).concat(
+    batch.failed.map(item => item && item.id).filter(Boolean)
+  ));
+  batch.notRun = (batch.requestedIds || []).filter(id => !settled.has(id));
+  markDeliveryFailed(jobId, message, 'send_bundle');
+  markDeliveryNotRun(batch.notRun);
+  return true;
+}
+
+function markDeliverySucceeded(jobId, at) {
+  state.jobs = BatchLifecycle.markSucceeded(state.jobs, jobId, at);
+  state.screened = BatchLifecycle.markSucceeded(state.screened, jobId, at);
+}
+
+function markDeliveryFailed(jobId, error, step) {
+  state.jobs = BatchLifecycle.markFailed(state.jobs, jobId, error, step);
+  state.screened = BatchLifecycle.markFailed(state.screened, jobId, error, step);
+}
+
+function markDeliveryNotRun(jobIds) {
+  state.jobs = BatchLifecycle.markNotRun(state.jobs, jobIds);
+  state.screened = BatchLifecycle.markNotRun(state.screened, jobIds);
 }
 
 async function hydrateReviewState() {
   const saved = await chrome.storage.local.get([
-    'sw_jobs', 'sw_screened', 'sw_greetings', 'sw_previews', 'lastBatch'
+    'sw_jobs', 'sw_screened', 'sw_previews', 'lastBatch', 'greetingPlansState',
+    'resumeImage', 'processed'
   ]);
-  if (!state.jobs.length) state.jobs = saved.sw_jobs || [];
-  if (!state.screened.length) state.screened = saved.sw_screened || [];
-  if (!Object.keys(state.greetings).length) state.greetings = saved.sw_greetings || {};
-  if (!Object.keys(state.previews).length) state.previews = saved.sw_previews || {};
+  if (!state.jobs.length) state.jobs = ReviewWorkflow.normalizeJobs(saved.sw_jobs || []);
+  if (!state.screened.length) state.screened = ReviewWorkflow.normalizeJobs(saved.sw_screened || state.jobs);
+  if (!Object.keys(state.previews).length) state.previews = ReviewWorkflow.migratePreviews(saved.sw_previews || {});
   if (!state.lastBatch) state.lastBatch = saved.lastBatch || null;
+  if (!state.greetingPlansState) {
+    state.greetingPlansState = GreetingPlans.normalizeState(saved.greetingPlansState, {
+      resumeImage: saved.resumeImage || ''
+    });
+  }
+  if (saved.processed) state.processed = saved.processed;
+  const cfg = await getCfg();
+  state.jobs = state.jobs.map(job => migrateReviewJob(job, cfg));
+  state.screened = state.screened.map(job => migrateReviewJob(job, cfg));
+  migrateDeliveryState();
+  recoverInterruptedLiveBatch();
+  await persistReviewState();
+  if (saved.resumeImage) await chrome.storage.local.remove('resumeImage');
 }
 
-async function runPreview(jobIds) {
-  state.aborted = false; state.paused = false; state.results = [];
-  state.phase = 'previewing'; pushPhase();
+function migrateReviewJob(job, cfg) {
+  const source = Object.assign({}, job || {});
+  const legacyLocation = Number(source.locationParseVersion) < JobFilters.LOCATION_PARSE_VERSION;
+  const located = JobFilters.applySearchCity(source, cfg.city);
+  let migrated = Object.assign({}, located, JobFilters.evaluate(located, cfg.jobFilterConfig));
+  const oldFilterReasons = Array.isArray(source.filterReasons) ? source.filterReasons : [];
+  if (legacyLocation && oldFilterReasons.some(reason => /城市|行政区/.test(reason))) {
+    migrated = Object.assign({}, migrated, {
+      match: false,
+      matchDecision: 'needs_info',
+      quickDecision: 'needs_info',
+      quickReason: '',
+      aiScreeningStatus: 'failed',
+      aiScreeningError: '位置识别规则已更新，请重新快速判断',
+      reviewStatus: '',
+      reason: (migrated.filterReasons || []).join('；') + '；AI：位置修复后请重新快速判断'
+    });
+  }
+  if (migrated.aiScreeningStatus === 'running' && !quickScreeningTasks.has(migrated.id)) {
+    migrated.aiScreeningStatus = 'failed';
+    migrated.aiScreeningError = '上次快速判断未完成，请重试';
+    migrated.match = false;
+    migrated.matchDecision = 'needs_info';
+    migrated.quickDecision = 'needs_info';
+    migrated.reviewStatus = '';
+  }
+  if (migrated.detailedScoreStatus === 'running' && !detailedScoringTasks.has(migrated.id)) {
+    migrated.detailedScoreStatus = 'failed';
+    migrated.detailedScoreError = '上次详细评分未完成，请重试';
+  }
+  return ReviewWorkflow.normalizeJob(migrated);
+}
+
+function syncJob(job) {
+  const normalized = ReviewWorkflow.normalizeJob(job);
+  const jobIndex = state.jobs.findIndex(item => item.id === normalized.id);
+  if (jobIndex >= 0) state.jobs[jobIndex] = normalized;
+  else state.jobs.push(normalized);
+  const screenedIndex = state.screened.findIndex(item => item.id === normalized.id);
+  if (screenedIndex >= 0) state.screened[screenedIndex] = normalized;
+  else state.screened.push(normalized);
+  return normalized;
+}
+
+// ── 收集与完整 JD 筛选 ──
+async function hydrateOneJob(job, cfg) {
+  try {
+    const detail = await readJobDetail(job, cfg);
+    return JobDetail.mergeDetail(job, Object.assign({}, detail.currentJob, {
+      jd: detail.jd || '', available: detail.available !== false, detailReadAt: detail.detailReadAt
+    }));
+  } catch (error) {
+    return Object.assign({}, job, { detailError: error.message || '详情读取失败' });
+  }
+}
+
+async function hydrateJobDetails(jobs, cfg) {
+  const result = [];
+  const concurrency = 2;
+  for (let index = 0; index < jobs.length; index += concurrency) {
+    if (state.aborted) break;
+    await waitIfPaused();
+    const batch = jobs.slice(index, index + concurrency);
+    const hydrated = await Promise.all(batch.map(job => hydrateOneJob(job, cfg)));
+    result.push.apply(result, hydrated);
+    progress(result.length, jobs.length, '读取详情');
+  }
+  return result;
+}
+
+async function collectAcrossSearchTerms(cfg, limit) {
+  const terms = SearchStrategy.resolveTerms({
+    keyword: cfg.keyword,
+    matchMode: cfg.searchMatchMode,
+    keywordExpansionEnabled: cfg.keywordExpansionEnabled
+  });
+  let collected = [];
+  let rawCards = 0;
+  const maximum = Math.max(1, Number(limit) || 20);
+  const maxRounds = Math.max(1, Math.ceil(maximum / 5));
+
+  log('搜索范围：' + terms.length + ' 个关键词，唯一岗位上限 ' + maximum);
+  for (let round = 1; round <= maxRounds && collected.length < maximum; round++) {
+    let roundAdded = 0;
+    for (let index = 0; index < terms.length && collected.length < maximum; index++) {
+      if (state.aborted) break;
+      await waitIfPaused();
+      const term = terms[index];
+      const remainingTerms = Math.max(1, terms.length - index);
+      const quota = Math.min(5, Math.max(1, Math.ceil((maximum - collected.length) / remainingTerms)));
+      try {
+        log('搜索岗位：' + term + '（第 ' + round + ' 轮）');
+        const tab = await getSearchTab(cfg, term);
+        await ensureInjected(tab.id, 'src/content-search.js');
+        const target = SearchStrategy.roundTarget(round, maximum);
+        const response = await sendToTab(tab.id, { type: 'SCRAPE', count: target });
+        if (!response || !response.success) {
+          throw new Error((response && response.error) || '岗位收集失败');
+        }
+        const jobs = (response.jobs || []).map(JobDetail.normalizeCollectedJob);
+        rawCards += jobs.length;
+        const known = new Set(collected.map(job => job.id));
+        const duplicates = jobs.filter(job => known.has(job.id));
+        const fresh = jobs.filter(job => !known.has(job.id)).slice(0, quota);
+        const before = collected.length;
+        collected = SearchStrategy.mergeJobs(collected, duplicates.concat(fresh), term, maximum);
+        roundAdded += collected.length - before;
+        progress(collected.length, maximum, '跨词收集');
+      } catch (error) {
+        throw new Error('搜索词“' + term + '”失败：' + error.message);
+      }
+    }
+    if (state.aborted || collected.length >= maximum) break;
+    if (roundAdded === 0) {
+      log('全部关键词本轮没有新增岗位，已停止继续翻页', 'warn');
+      break;
+    }
+  }
+  log('跨词收集完成：原始卡片 ' + rawCards + '，去重后 ' + collected.length, 'success');
+  return { jobs: collected, terms: terms, rawCards: rawCards };
+}
+
+async function runCollect() {
+  state.aborted = false;
+  state.paused = false;
+  state.jobs = [];
+  state.screened = [];
+  state.previews = {};
+  state.lastBatch = null;
+  state.results = [];
+  state.phase = 'collecting';
+  pushPhase();
+
+  const cfg = await getCfg();
+  if (!cfg.llmApiKey) return stopWithConfigError('请先填写 AI 模型 API Key');
+  if (!String(cfg.keyword || '').trim()) return stopWithConfigError('请先填写岗位关键词');
+  if (!resumeFull(cfg)) return stopWithConfigError('请先填写简历文字');
+  try { JobFilters.normalizeConfig(cfg.jobFilterConfig); }
+  catch (error) { return stopWithConfigError(error.message); }
+
+  const city = resolveCity(cfg);
+  log('准备搜索：' + cfg.keyword + ' | 城市：' + (city.found ? city.name : '全国'));
+  if (cfg.city && !city.found) log('城市“' + cfg.city + '”未识别，已按全国搜索', 'warn');
+
+  try {
+    const count = parseInt(cfg.count, 10) || 20;
+    const collection = await collectAcrossSearchTerms(cfg, count);
+    const collected = collection.jobs;
+    log('收集到 ' + collected.length + ' 个岗位，开始读取完整详情', 'success');
+    if (!collected.length) throw new Error('没有收集到岗位');
+
+    state.phase = 'screening';
+    pushPhase();
+    const hydrated = await hydrateJobDetails(collected, cfg);
+    state.jobs = hydrated.map(job => hardFilterJob(job, cfg));
+    await trackCollectedJobs(state.jobs);
+
+    const blocked = state.jobs.filter(job => job.filterStatus !== 'pass').map(blockedScreenResult);
+    const eligible = state.jobs.filter(job => job.filterStatus === 'pass');
+    state.screened = blocked.slice();
+    log('硬筛选：通过 ' + eligible.length + '，排除 '
+      + blocked.filter(job => job.filterStatus === 'fail').length + '，待补充 '
+      + blocked.filter(job => job.filterStatus === 'pending').length);
+    log('AI 使用完整 JD 快速筛选中（' + providerNameFrom(cfg) + '）…');
+
+    let completed = blocked.length;
+    progress(completed, state.jobs.length, 'AI 筛选');
+    const concurrency = 3;
+    for (let index = 0; index < eligible.length; index += concurrency) {
+      if (state.aborted) break;
+      await waitIfPaused();
+      const batch = eligible.slice(index, index + concurrency);
+      const screenedBatch = await Promise.all(batch.map(async job => {
+        try {
+          const result = await screenJob(cfg, job);
+          return ReviewWorkflow.normalizeJob(Object.assign({}, job, result));
+        } catch (error) {
+          return ReviewWorkflow.normalizeJob(Object.assign(
+            {}, job, MatchScoring.quickPendingResult('模型调用异常：' + error.message)
+          ));
+        }
+      }));
+      state.screened.push.apply(state.screened, screenedBatch);
+      completed += screenedBatch.length;
+      progress(completed, state.jobs.length, 'AI 筛选');
+    }
+
+    state.screened.forEach(screened => {
+      const index = state.jobs.findIndex(job => job.id === screened.id);
+      if (index >= 0) state.jobs[index] = screened;
+    });
+    const matched = state.screened.filter(job => job.reviewStatus === 'pending_review').length;
+    const aiNeedsInfo = state.screened.filter(job => job.filterStatus === 'pass'
+      && job.matchDecision === 'needs_info').length;
+    const aiExcluded = state.screened.filter(job => job.filterStatus === 'pass'
+      && job.matchDecision === 'excluded').length;
+    log('筛选完成：推荐 ' + matched + '，AI 待确认 ' + aiNeedsInfo
+      + '，AI 建议排除 ' + aiExcluded + ' / 总计 ' + state.screened.length, 'success');
+    await persistReviewState();
+    state.phase = 'review';
+    pushPhase();
+    chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
+  } catch (error) {
+    log('收集失败：' + error.message, 'error');
+    state.phase = 'idle';
+    pushPhase();
+  }
+}
+
+function stopWithConfigError(message) {
+  log(message, 'error');
+  state.phase = 'idle';
+  pushPhase();
+}
+
+async function confirmFilterPending(jobId) {
   await hydrateReviewState();
   const cfg = await getCfg();
-  const ids = (jobIds || []).filter(id => {
-    const screened = state.screened.find(item => item.id === id);
-    return screened && screened.filterStatus === 'pass' && screened.match && !state.processed[id];
+  const job = findJob(jobId);
+  if (!job) throw new Error('找不到待补充岗位');
+  const confirmed = JobFilters.confirmPending(job, cfg.jobFilterConfig);
+  const updated = syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, confirmed, {
+    match: false,
+    matchDecision: 'needs_info',
+    quickDecision: 'needs_info',
+    quickReason: '',
+    aiScreeningStatus: 'running',
+    aiScreeningError: '',
+    reviewStatus: 'needs_info',
+    reviewUpdatedAt: Date.now(),
+    reason: (confirmed.filterReasons || []).join('；') + '；AI：快速判断中…'
+  })));
+  await persistReviewState();
+  broadcastScreened();
+  runQuickScreeningForJob(jobId, cfg).catch(() => {});
+  return { screened: state.screened, job: updated };
+}
+
+function broadcastScreened() {
+  chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
+}
+
+async function runQuickScreeningForJob(jobId, cfg) {
+  quickScreeningTasks.add(jobId);
+  const job = findJob(jobId);
+  if (!job) {
+    quickScreeningTasks.delete(jobId);
+    throw new Error('找不到待判断岗位');
+  }
+  try {
+    const result = await screenJob(cfg, job);
+    const latest = findJob(jobId) || job;
+    syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, result, {
+      reviewStatus: '',
+      reviewUpdatedAt: Date.now(),
+      reason: (latest.filterReasons || []).join('；') + '；AI：' + result.reason
+    })));
+  } catch (error) {
+    const latest = findJob(jobId) || job;
+    const failed = MatchScoring.quickPendingResult(error.message || '快速判断失败');
+    syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, failed, {
+      reviewStatus: '',
+      reviewUpdatedAt: Date.now(),
+      reason: (latest.filterReasons || []).join('；') + '；AI：' + failed.reason
+    })));
+  }
+  try {
+    await persistReviewState();
+    broadcastScreened();
+  } finally {
+    quickScreeningTasks.delete(jobId);
+  }
+}
+
+async function retryQuickScreening(jobId) {
+  await hydrateReviewState();
+  const cfg = await getCfg();
+  const job = findJob(jobId);
+  if (!job || job.filterStatus !== 'pass') throw new Error('岗位硬筛选尚未通过');
+  if (job.aiScreeningStatus === 'running') throw new Error('该岗位正在快速判断');
+  const updated = syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, job, {
+    match: false,
+    matchDecision: 'needs_info',
+    quickDecision: 'needs_info',
+    quickReason: '',
+    aiScreeningStatus: 'running',
+    aiScreeningError: '',
+    reviewStatus: 'needs_info',
+    reviewUpdatedAt: Date.now(),
+    reason: (job.filterReasons || []).join('；') + '；AI：快速判断中…'
+  })));
+  await persistReviewState();
+  broadcastScreened();
+  runQuickScreeningForJob(jobId, cfg).catch(() => {});
+  return { screened: state.screened, job: updated };
+}
+
+async function runDetailedScoreForJob(jobId, cfg) {
+  detailedScoringTasks.add(jobId);
+  const job = findJob(jobId);
+  if (!job) {
+    detailedScoringTasks.delete(jobId);
+    throw new Error('找不到待评分岗位');
+  }
+  try {
+    const detailed = await scoreJobDetailed(cfg, job);
+    const latest = findJob(jobId) || job;
+    syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, {
+      matchScore: detailed.matchScore,
+      matchDimensions: detailed.matchDimensions,
+      matchStrengths: detailed.matchStrengths,
+      matchRisks: detailed.matchRisks,
+      detailedScore: {
+        score: detailed.matchScore,
+        dimensions: detailed.matchDimensions,
+        strengths: detailed.matchStrengths,
+        risks: detailed.matchRisks,
+        reason: detailed.reason
+      },
+      detailedScoreStatus: 'succeeded',
+      detailedScoreError: ''
+    })));
+  } catch (error) {
+    const latest = findJob(jobId) || job;
+    syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, {
+      detailedScoreStatus: 'failed',
+      detailedScoreError: error.message || '详细评分失败'
+    })));
+  }
+  try {
+    await persistReviewState();
+    broadcastScreened();
+  } finally {
+    detailedScoringTasks.delete(jobId);
+  }
+}
+
+async function generateDetailedScore(jobId) {
+  await hydrateReviewState();
+  const cfg = await getCfg();
+  const job = findJob(jobId);
+  if (!job || job.filterStatus !== 'pass') throw new Error('岗位硬筛选尚未通过');
+  if (job.detailedScoreStatus === 'running') throw new Error('该岗位正在生成详细评分');
+  const updated = syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, job, {
+    detailedScoreStatus: 'running', detailedScoreError: ''
+  })));
+  await persistReviewState();
+  broadcastScreened();
+  runDetailedScoreForJob(jobId, cfg).catch(() => {});
+  return { screened: state.screened, job: updated };
+}
+
+async function batchApprove(jobIds) {
+  await hydrateReviewState();
+  const result = ReviewWorkflow.approveMany(state.screened, jobIds, Date.now());
+  if (!result.approvedIds.length) throw new Error('没有可批量批准的推荐岗位');
+  state.screened = result.jobs;
+  state.screened.forEach(job => {
+    const index = state.jobs.findIndex(item => item.id === job.id);
+    if (index >= 0) state.jobs[index] = job;
   });
+  await persistReviewState();
+  broadcastScreened();
+  return { screened: state.screened, approvedIds: result.approvedIds };
+}
+
+async function overrideScoreDecision(jobId) {
+  await hydrateReviewState();
+  const job = findScreened(jobId) || findJob(jobId);
+  if (!job) throw new Error('找不到岗位');
+  const updated = syncJob(ReviewWorkflow.overrideScore(job, Date.now()));
+  await persistReviewState();
+  chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
+  return { job: updated, screened: state.screened, previews: state.previews };
+}
+
+async function setReviewDecision(jobId, decision) {
+  await hydrateReviewState();
+  const job = findScreened(jobId) || findJob(jobId);
+  if (!job) throw new Error('找不到岗位');
+  const updated = syncJob(ReviewWorkflow.setDecision(job, decision, Date.now()));
+  if (decision !== 'approved' && state.previews[jobId]) {
+    state.previews[jobId] = Object.assign({}, state.previews[jobId], {
+      status: 'expired', error: '岗位已取消批准'
+    });
+  }
+  await persistReviewState();
+  chrome.runtime.sendMessage({ type: 'SCREENED', screened: state.screened }).catch(() => {});
+  return { job: updated, screened: state.screened, previews: state.previews };
+}
+
+// ── 招呼方案 ──
+async function saveGreetingPlans(nextState) {
+  await hydrateReviewState();
+  const normalized = GreetingPlans.normalizeState(nextState);
+  state.greetingPlansState = normalized;
+  invalidatePreviews('招呼方案已变化，需要重新预演');
+  await storageSet({
+    greetingPlansState: normalized,
+    sw_previews: state.previews
+  });
+  return { state: normalized, previews: state.previews };
+}
+
+function invalidatePreviews(reason) {
+  Object.keys(state.previews || {}).forEach(jobId => {
+    const preview = state.previews[jobId];
+    if (preview && preview.status !== 'failed') {
+      state.previews[jobId] = Object.assign({}, preview, {
+        status: 'expired', error: reason || '配置已变化，需要重新预演'
+      });
+    }
+  });
+}
+
+async function invalidateStoredPreviews(reason) {
+  await hydrateReviewState();
+  invalidatePreviews(reason);
+  await persistReviewState();
+  return { previews: state.previews };
+}
+
+// ── 预演与冻结 ──
+function previewInputs(job, cfg, plan, jd) {
+  return {
+    job: job,
+    jd: jd || job.jd || '',
+    resumeText: resumeFull(cfg),
+    jobFilterConfig: cfg.jobFilterConfig || {},
+    plan: plan
+  };
+}
+
+function createPreviewRunId() {
+  return 'preview-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+
+function pushPreviewProgress(prepared, jobId, stage, completed, error, preview) {
+  chrome.runtime.sendMessage({
+    type: 'PREVIEW_PROGRESS',
+    runId: prepared.runId,
+    jobId: jobId,
+    stage: stage,
+    completed: completed,
+    total: prepared.ids.length,
+    error: error || '',
+    preview: preview || null
+  }).catch(() => {});
+}
+
+async function preparePreviewRun(jobIds) {
+  await hydrateReviewState();
+  const cfg = await getCfg();
+  const plan = GreetingPlans.validateForSend(selectedGreetingPlan(cfg));
+  const requested = Array.from(new Set((Array.isArray(jobIds) && jobIds.length
+    ? jobIds
+    : state.screened.filter(job => job.reviewStatus === 'approved').map(job => job.id))
+    .map(id => String(id || '').trim()).filter(Boolean)));
+  const ids = requested.filter(id => {
+    const job = findScreened(id);
+    return job && job.reviewStatus === 'approved' && !state.processed[id];
+  });
+  if (!ids.length) throw new Error('没有已批准的岗位可预演');
+  return {
+    runId: createPreviewRunId(),
+    cfg: cfg,
+    plan: plan,
+    requested: requested,
+    ids: ids
+  };
+}
+
+async function runPreview(prepared) {
+  state.aborted = false;
+  state.paused = false;
+  state.results = [];
+  state.phase = 'previewing';
+  pushPhase();
+  const cfg = prepared.cfg;
+  const plan = prepared.plan;
+  const requested = prepared.requested;
+  const ids = prepared.ids;
+
   state.lastBatch = {
     mode: 'preview', status: 'running', startedAt: Date.now(),
-    requestedIds: ids.slice(), succeeded: [], failed: [], notRun: []
+    runId: prepared.runId,
+    greetingPlanId: plan.id, requestedIds: requested, executedIds: ids.slice(),
+    succeeded: [], failed: [], notRun: []
   };
-  if (!ids.length) {
-    state.lastBatch.status = 'failed';
-    state.lastBatch.failed.push({ id: '', error: '没有可预演的岗位' });
-    await chrome.storage.local.set({ lastBatch: state.lastBatch });
-    log('没有可预演的岗位', 'warn'); state.phase = 'review'; pushPhase(); return;
+
+  progress(0, ids.length, '预演');
+  ids.forEach(id => pushPreviewProgress(prepared, id, 'queued', 0));
+  for (let index = 0; index < ids.length; index++) {
+    if (state.aborted) {
+      state.lastBatch.status = 'stopped';
+      state.lastBatch.notRun = ids.slice(index);
+      state.lastBatch.notRun.forEach(id => {
+        pushPreviewProgress(prepared, id, 'not_run', state.lastBatch.succeeded.length);
+      });
+      break;
+    }
+    await waitIfPaused();
+    const original = findJob(ids[index]);
+    try {
+      if (!original) throw new Error('找不到岗位数据');
+      log('[' + (index + 1) + '/' + ids.length + '] 预演 ' + original.name + ' - ' + (original.company || ''));
+      pushPreviewProgress(prepared, original.id, 'reading_detail', state.lastBatch.succeeded.length);
+      const detail = await readJobDetail(original, cfg);
+      const current = JobDetail.mergeDetail(original, Object.assign({}, detail.currentJob, { jd: detail.jd || '' }));
+      pushPreviewProgress(prepared, original.id, 'verifying', state.lastBatch.succeeded.length);
+      const verified = WorkflowSafety.verifyEligibility(original, current, cfg.jobFilterConfig, state.processed);
+      if (!verified.ok) throw new Error(verified.reasons.join('；'));
+      verified.job.reviewStatus = original.reviewStatus;
+      if (plan.aiOpeningEnabled) {
+        pushPreviewProgress(prepared, original.id, 'generating_opening', state.lastBatch.succeeded.length);
+      }
+      const aiOpening = plan.aiOpeningEnabled
+        ? await generateAiOpeningWithRetry(cfg, plan, verified.job, detail.jd || '')
+        : '';
+      if (plan.aiOpeningEnabled && !aiOpening) throw new Error('AI 个性化开场生成失败');
+      const preview = ReviewWorkflow.createPreview(
+        previewInputs(verified.job, cfg, plan, detail.jd || ''),
+        { aiOpening: aiOpening, fixedMessage: plan.fixedMessage },
+        Date.now()
+      );
+      state.previews[original.id] = preview;
+      state.lastBatch.succeeded.push(original.id);
+      progress(index + 1, ids.length, '预演');
+      await persistReviewState();
+      pushPreviewProgress(prepared, original.id, 'draft', index + 1, '', preview);
+    } catch (error) {
+      if (state.aborted || (error && error.code === 'cancelled')) {
+        state.lastBatch.status = 'stopped';
+        state.lastBatch.notRun = ids.slice(index);
+        state.lastBatch.notRun.forEach(id => {
+          pushPreviewProgress(prepared, id, 'not_run', index);
+        });
+        log('预演已停止', 'warn');
+        break;
+      }
+      const message = error && error.message ? error.message : '预演失败';
+      state.previews[ids[index]] = {
+        jobId: ids[index], status: 'failed', aiOpening: '', fixedMessage: '',
+        inputFingerprint: '', error: message, createdAt: Date.now()
+      };
+      state.lastBatch.failed.push({ id: ids[index], error: message });
+      pushPreviewProgress(
+        prepared, ids[index], 'failed', index + 1,
+        message, state.previews[ids[index]]
+      );
+      progress(index + 1, ids.length, '预演');
+      await persistReviewState();
+      if (isGlobalBlockingError(error)) {
+        state.lastBatch.status = 'failed';
+        state.lastBatch.notRun = ids.slice(index + 1);
+        state.lastBatch.notRun.forEach(id => {
+          pushPreviewProgress(prepared, id, 'not_run', index + 1);
+        });
+        log('预演失败，已停止批次：' + message, 'error');
+        break;
+      }
+      log('当前岗位预演失败，已继续下一岗位：' + message, 'warn');
+    }
+  }
+  if (state.lastBatch.status === 'running') state.lastBatch.status = 'completed';
+  state.lastBatch.finishedAt = Date.now();
+  await persistReviewState();
+  state.phase = 'review';
+  pushPhase();
+  chrome.runtime.sendMessage({
+    type: 'PREVIEWED', runId: prepared.runId, previews: state.previews,
+    lastBatch: state.lastBatch, screened: state.screened
+  }).catch(() => {});
+  log('预演结束：成功 ' + state.lastBatch.succeeded.length
+    + ' | 失败 ' + state.lastBatch.failed.length
+    + ' | 未执行 ' + state.lastBatch.notRun.length,
+  state.lastBatch.failed.length ? 'warn' : 'success');
+}
+
+async function handlePreviewRunError(error, prepared) {
+  const message = (error && error.message) || '预演失败';
+  const succeeded = state.lastBatch && Array.isArray(state.lastBatch.succeeded)
+    ? state.lastBatch.succeeded.slice() : [];
+  const failedIds = state.lastBatch && Array.isArray(state.lastBatch.failed)
+    ? state.lastBatch.failed.map(item => item.id) : [];
+  const notRun = prepared.ids.filter(id => succeeded.indexOf(id) < 0 && failedIds.indexOf(id) < 0);
+  state.lastBatch = Object.assign({
+    mode: 'preview', runId: prepared.runId, startedAt: Date.now(),
+    greetingPlanId: prepared.plan.id, requestedIds: prepared.requested,
+    executedIds: prepared.ids.slice(), succeeded: succeeded, failed: []
+  }, state.lastBatch || {}, {
+    status: 'failed', notRun: notRun, finishedAt: Date.now()
+  });
+  if (!state.lastBatch.failed.length) state.lastBatch.failed.push({ id: '', error: message });
+  notRun.forEach(id => pushPreviewProgress(prepared, id, 'not_run', succeeded.length));
+  await persistReviewState().catch(() => {});
+  log('预演失败：' + message, 'error');
+  state.phase = 'review';
+  pushPhase();
+  chrome.runtime.sendMessage({
+    type: 'PREVIEWED', runId: prepared.runId, previews: state.previews,
+    lastBatch: state.lastBatch, screened: state.screened, error: message
+  }).catch(() => {});
+}
+
+async function confirmPreview(jobId, aiOpening) {
+  await hydrateReviewState();
+  const preview = state.previews[jobId];
+  const job = findScreened(jobId);
+  if (!preview || !job) throw new Error('找不到岗位预演');
+  if (job.reviewStatus !== 'approved') throw new Error('只有已批准岗位可以确认预演');
+  state.previews[jobId] = ReviewWorkflow.confirmPreview(preview, aiOpening, Date.now());
+  await persistReviewState();
+  return { preview: state.previews[jobId], previews: state.previews };
+}
+
+async function updatePreviewDraft(jobId, aiOpening, editedAt) {
+  await hydrateReviewState();
+  const preview = state.previews[jobId];
+  const job = findScreened(jobId);
+  if (!preview || !job) throw new Error('找不到岗位预演');
+  if (job.reviewStatus !== 'approved') throw new Error('只有已批准岗位可以编辑预演');
+  const editTime = Number(editedAt) || Date.now();
+  if (preview.confirmedAt && preview.confirmedAt >= editTime) {
+    return { preview: preview, previews: state.previews };
+  }
+  state.previews[jobId] = Object.assign({}, preview, {
+    aiOpening: String(aiOpening || ''),
+    status: 'draft',
+    confirmedAt: 0,
+    editedAt: editTime,
+    error: ''
+  });
+  await persistReviewState();
+  return { preview: state.previews[jobId], previews: state.previews };
+}
+
+async function regeneratePreviewOpening(jobId) {
+  await hydrateReviewState();
+  const preview = state.previews[jobId];
+  const job = findScreened(jobId);
+  if (!preview || !job) throw new Error('找不到岗位预演');
+  if (job.reviewStatus !== 'approved') throw new Error('只有已批准岗位可以重新生成开场');
+  if ((preview.enabledSteps || []).indexOf('aiOpening') < 0) {
+    throw new Error('当前招呼方案未启用 AI 开场');
+  }
+  const cfg = await getCfg();
+  const plan = GreetingPlans.validateForSend(selectedGreetingPlan(cfg));
+  if (plan.id !== preview.greetingPlanId) throw new Error('招呼方案已变化，请重新预演');
+  const jd = String(preview.jd || job.jd || '').trim();
+  if (!jd) throw new Error('预演缺少完整 JD，无法重新生成');
+
+  const aiOpening = await generateAiOpeningWithRetry(cfg, plan, job, jd);
+  const regenerated = ReviewWorkflow.regeneratePreview(
+    preview,
+    previewInputs(job, cfg, plan, jd),
+    aiOpening,
+    Date.now()
+  );
+  state.previews[jobId] = regenerated;
+  await persistReviewState();
+  log('已重新生成 ' + job.name + ' 的 AI 开场，请再次确认', 'success');
+  return { preview: regenerated, previews: state.previews };
+}
+
+// ── 正式三段式投递 ──
+async function openVerifiedChatPage(job, cfg, plan, temporaryTabIds) {
+  state.lastBatch.currentStep = 'detail';
+  const opened = await openJobForDelivery(job, cfg);
+  if (opened.temporary) temporaryTabIds.add(opened.tab.id);
+
+  const current = JobDetail.mergeDetail(job, Object.assign({}, opened.detail.currentJob, {
+    jd: opened.detail.jd || ''
+  }));
+  const verified = WorkflowSafety.verifyEligibility(job, current, cfg.jobFilterConfig, state.processed);
+  if (!verified.ok) throw new Error('发送前校验失败：' + verified.reasons.join('；'));
+  verified.job.reviewStatus = job.reviewStatus;
+  const previewGate = ReviewWorkflow.isPreviewReady(
+    state.previews[job.id],
+    previewInputs(verified.job, cfg, plan, opened.detail.jd || '')
+  );
+  if (!previewGate.ok) throw new Error(previewGate.reason);
+
+  state.lastBatch.currentStep = 'contact';
+  return establishChatPage(opened, job, temporaryTabIds);
+}
+
+async function runDeliver(jobIds) {
+  state.aborted = false;
+  state.paused = false;
+  state.results = [];
+  state.phase = 'delivering';
+  pushPhase();
+  await hydrateReviewState();
+  const cfg = await getCfg();
+  const plan = GreetingPlans.validateForSend(selectedGreetingPlan(cfg));
+  const ids = Array.isArray(jobIds) ? jobIds.slice() : [];
+  state.lastBatch = {
+    mode: 'live', status: 'running', startedAt: Date.now(),
+    greetingPlanId: plan.id, requestedIds: ids.slice(), executedIds: [],
+    currentJobId: '', currentStep: '', succeeded: [], failed: [], notRun: []
+  };
+  if (!ids.length) return finishDeliverWithError('', '没有可投递的岗位', []);
+
+  for (const id of ids) {
+    const job = findScreened(id);
+    const gate = WorkflowSafety.canDeliver(job, state.previews[id], state.processed);
+    if (!gate.ok) return finishDeliverWithError(id, gate.reason, ids.filter(item => item !== id));
   }
 
-  const searchUrl = buildSearchUrl(cfg);
-  progress(0, ids.length, '预演');
   for (let index = 0; index < ids.length; index++) {
     if (state.aborted) {
       state.lastBatch.status = 'stopped';
@@ -332,216 +1345,314 @@ async function runPreview(jobIds) {
       break;
     }
     await waitIfPaused();
-    const job = findJob(ids[index]);
+    const job = findScreened(ids[index]);
+    const temporaryTabIds = new Set();
     try {
       if (!job) throw new Error('找不到岗位数据');
-      log('[' + (index + 1) + '/' + ids.length + '] 预演 ' + job.name + ' - ' + (job.company || ''));
-      const tab = await ensureTab(searchUrl);
-      await ensureInjected(tab.id, 'src/content-search.js');
-      const detail = await sendToTab(tab.id, { type: 'OPEN_JD', job: job });
-      if (!detail || !detail.success || !detail.currentJob) {
-        throw new Error((detail && detail.error) || '无法读取当前岗位详情');
+      state.lastBatch.currentJobId = job.id;
+      state.lastBatch.executedIds.push(job.id);
+      log('[' + (index + 1) + '/' + ids.length + '] 正式投递 ' + job.name + ' - ' + (job.company || ''));
+
+      let chatPage = null;
+      for (let attempt = 0; attempt < ContactRetry.MAX_ATTEMPTS; attempt++) {
+        try {
+          chatPage = await openVerifiedChatPage(job, cfg, plan, temporaryTabIds);
+          break;
+        } catch (error) {
+          const retry = ContactRetry.shouldRetry(error, {
+            attempt: attempt,
+            sendStarted: false,
+            aborted: state.aborted,
+            paused: state.paused
+          });
+          if (!retry) throw error;
+          log('聊天身份加载失败，正在自动重试 1/1', 'warn');
+        }
       }
-      const verified = WorkflowSafety.verifyEligibility(
-        job, detail.currentJob, cfg.jobFilterConfig, state.processed
-      );
-      if (!verified.ok) throw new Error(verified.reasons.join('；'));
-      const greeting = await genGreetingFromJD(cfg, verified.job, detail.jd || '');
-      if (!greeting) throw new Error('招呼语生成失败');
+      if (!chatPage) throw new Error('未找到对应岗位聊天页');
 
-      state.previews[job.id] = {
-        status: 'ready',
-        greeting: greeting,
-        jd: String(detail.jd || '').slice(0, 1800),
-        verifiedAt: Date.now(),
-        currentJob: verified.job,
-        error: ''
-      };
-      state.lastBatch.succeeded.push(job.id);
-      progress(index + 1, ids.length, '预演');
-      await chrome.storage.local.set({ sw_previews: state.previews, lastBatch: state.lastBatch });
-    } catch (error) {
-      const message = error && error.message ? error.message : '预演失败';
-      if (job) state.previews[job.id] = { status: 'failed', greeting: '', error: message, verifiedAt: Date.now() };
-      state.lastBatch.status = 'failed';
-      state.lastBatch.failed.push({ id: job ? job.id : ids[index], error: message });
-      state.lastBatch.notRun = ids.slice(index + 1);
-      log('预演失败，已停止批次：' + message, 'error');
-      break;
-    }
-  }
-  if (state.lastBatch.status === 'running') state.lastBatch.status = 'completed';
-  state.lastBatch.finishedAt = Date.now();
-  await chrome.storage.local.set({ sw_previews: state.previews, lastBatch: state.lastBatch });
-  state.phase = 'review'; pushPhase();
-  chrome.runtime.sendMessage({
-    type: 'PREVIEWED', previews: state.previews, lastBatch: state.lastBatch
-  }).catch(() => {});
-}
-
-// ── 流程：投递（单个闭环：建联→进聊天页→发图片+招呼语→回搜索页→下一个）──
-async function runDeliver(jobIds) {
-  state.aborted = false; state.paused = false; state.results = [];
-  state.phase = 'delivering'; pushPhase();
-  await hydrateReviewState();
-  const cfg = await getCfg();
-  if (!cfg.resumeImage) log('未上传简历图片，将只发招呼语', 'warn');
-
-  const ids = (jobIds || []).slice();
-  state.lastBatch = {
-    mode: 'live', status: 'running', startedAt: Date.now(),
-    requestedIds: ids.slice(), succeeded: [], failed: [], notRun: []
-  };
-  const blocked = ids.find(id => !WorkflowSafety.canDeliver(id, state.previews, state.processed).ok);
-  if (blocked) {
-    const gate = WorkflowSafety.canDeliver(blocked, state.previews, state.processed);
-    const blockedJob = findJob(blocked) || { id: blocked, name: '未知岗位' };
-    recordFail(blockedJob, gate.reason);
-    state.lastBatch.status = 'failed';
-    state.lastBatch.failed.push({ id: blocked, error: gate.reason });
-    state.lastBatch.notRun = ids.filter(id => id !== blocked);
-    log('正式投递已阻止：' + gate.reason, 'error');
-    await finishDeliver();
-    return;
-  }
-  if (!ids.length) {
-    state.lastBatch.status = 'failed';
-    state.lastBatch.failed.push({ id: '', error: '没有可投递的岗位' });
-    log('没有可投递的岗位', 'warn');
-    await finishDeliver();
-    return;
-  }
-  const searchUrl = buildSearchUrl(cfg);
-
-  for (let k = 0; k < ids.length; k++) {
-    if (state.aborted) {
-      state.lastBatch.status = 'stopped';
-      state.lastBatch.notRun = ids.slice(k);
-      break;
-    }
-    await waitIfPaused();
-    const job = findJob(ids[k]);
-    try {
-      if (!job) throw new Error('找不到岗位数据');
+      const injected = await ensureInjected(chatPage.tab.id, 'src/content-chat.js');
+      if (!injected) throw new Error('聊天页脚本注入失败');
+      state.lastBatch.currentStep = 'send_bundle';
+      await persistReviewState();
+      broadcastDeliveryState();
       const preview = state.previews[job.id];
-      log('[' + (k + 1) + '/' + ids.length + '] 正式投递 ' + job.name + ' - ' + (job.company || ''));
-
-      const tab = await ensureTab(searchUrl);
-      await ensureInjected(tab.id, 'src/content-search.js');
-      const detail = await sendToTab(tab.id, { type: 'OPEN_JD', job: job });
-      if (!detail || !detail.success || !detail.currentJob) {
-        throw new Error((detail && detail.error) || '无法读取当前岗位详情');
+      const sent = await sendToTab(chatPage.tab.id, {
+        type: 'SEND_BUNDLE',
+        aiOpening: plan.aiOpeningEnabled ? preview.aiOpening : '',
+        fixedMessage: plan.fixedMessageEnabled ? preview.fixedMessage : '',
+        image: plan.resumeImageEnabled ? plan.resumeImage : ''
+      }, 45000);
+      if (!sent || !sent.success) {
+        const stage = sent && sent.stage ? sent.stage : '发送';
+        throw new Error(stage + '失败：' + ((sent && sent.error) || '未知错误'));
       }
-      const verified = WorkflowSafety.verifyEligibility(
-        job, detail.currentJob, cfg.jobFilterConfig, state.processed
-      );
-      if (!verified.ok) throw new Error(verified.reasons.join('；'));
 
-      const chat = await sendToTab(tab.id, { type: 'GO_CHAT', job: job });
-      if (!chat || !chat.success) throw new Error((chat && chat.error) || '建立沟通失败');
-      await waitTabComplete(tab.id); await sleep(2500);
-      const url = await curUrl(tab.id);
-      if (url.indexOf('/web/geek/chat') < 0) throw new Error('未跳转聊天页');
+      const completedSteps = Array.isArray(sent.completed) ? sent.completed.slice() : [];
+      const warnings = Array.isArray(sent.warnings) ? sent.warnings.slice() : [];
+      const imageEnabled = plan.resumeImageEnabled && !!plan.resumeImage;
+      const textEnabled = (plan.aiOpeningEnabled && !!preview.aiOpening)
+        || (plan.fixedMessageEnabled && !!preview.fixedMessage);
+      const imageConfirmed = sent.imageConfirmed === true
+        || completedSteps.indexOf('resumeImage') >= 0;
 
-      await ensureInjected(tab.id, 'src/content-chat.js');
-      const sent = await sendToTab(tab.id, {
-        type: 'SEND_ACTIVE', image: cfg.resumeImage || '', greeting: preview.greeting
+      state.results.push({
+        id: job.id, name: job.name, ok: true,
+        completed: completedSteps, warnings: warnings, imageConfirmed: imageConfirmed
       });
-      if (!sent || !sent.success) throw new Error((sent && sent.error) || '发送失败');
-
-      recordOk(job);
       state.lastBatch.succeeded.push(job.id);
+      markDeliverySucceeded(job.id, Date.now());
       state.processed[job.id] = 1;
-      await chrome.storage.local.set({ processed: state.processed, lastBatch: state.lastBatch });
+      await persistReviewState();
+      broadcastDeliveryState();
       try { await markTrackerContacted(job); }
-      catch (trackerError) { log('岗位已发送，但进度记录更新失败：' + trackerError.message, 'warn'); }
-      log('  ✓ 投递成功', 'success');
-      progress(k + 1, ids.length, '投递');
+      catch (error) { log('岗位已发送，但进度记录更新失败：' + error.message, 'warn'); }
+      if (imageEnabled && imageConfirmed && textEnabled) {
+        log('✓ 招呼文字和简历图片发送成功', 'success');
+      } else if (imageEnabled && !imageConfirmed && textEnabled) {
+        log('✓ 招呼文字发送成功｜简历图片未确认，已继续下一岗位', 'warn');
+      } else if (imageEnabled && imageConfirmed) {
+        log('✓ 简历图片发送成功', 'success');
+      } else {
+        log('✓ 招呼文字发送成功', 'success');
+      }
+      progress(index + 1, ids.length, '投递');
       await rand(2500, 4500);
     } catch (error) {
       const message = error && error.message ? error.message : '投递失败';
-      recordFail(job || { id: ids[k], name: '未知岗位' }, message);
-      state.lastBatch.status = 'failed';
-      state.lastBatch.failed.push({ id: ids[k], error: message });
-      state.lastBatch.notRun = ids.slice(k + 1);
-      log('投递失败，已停止批次：' + message, 'error');
+      if (state.aborted || (error && error.code === 'cancelled')) {
+        state.lastBatch.status = 'stopped';
+        state.lastBatch.notRun = ids.slice(index);
+        markDeliveryNotRun(state.lastBatch.notRun);
+        log('投递已停止', 'warn');
+      } else {
+        state.results.push({ id: ids[index], name: job ? job.name : '未知岗位', ok: false, msg: message });
+        state.lastBatch.failed.push({ id: ids[index], step: state.lastBatch.currentStep, error: message });
+        markDeliveryFailed(ids[index], message, state.lastBatch.currentStep);
+        const sendStarted = state.lastBatch.currentStep === 'send_bundle';
+        const mustStop = BatchLifecycle.shouldStopAfterFailure({
+          sendStarted: sendStarted,
+          globalBlock: isGlobalBlockingError(error),
+          aborted: state.aborted
+        });
+        if (mustStop) {
+          state.lastBatch.status = 'failed';
+          state.lastBatch.notRun = ids.slice(index + 1);
+          markDeliveryNotRun(state.lastBatch.notRun);
+          log('投递失败，已停止批次：' + message, 'error');
+        } else {
+          log('当前岗位发送前失败，已跳过并继续：' + message, 'warn');
+          progress(index + 1, ids.length, '投递');
+        }
+        await persistReviewState();
+        broadcastDeliveryState();
+        if (!mustStop) continue;
+      }
+      await persistReviewState();
+      broadcastDeliveryState();
       break;
+    } finally {
+      await removeTabs(Array.from(temporaryTabIds));
     }
   }
   await finishDeliver();
 }
-function recordOk(job) { state.results.push({ id: job.id, name: job.name, ok: true }); }
-function recordFail(job, msg) { state.results.push({ id: job.id, name: job.name, ok: false, msg: msg }); }
+
+async function finishDeliverWithError(jobId, message, notRun) {
+  state.lastBatch.status = 'failed';
+  state.lastBatch.failed.push({ id: jobId, error: message });
+  state.lastBatch.notRun = notRun || [];
+  markDeliveryFailed(jobId, message, state.lastBatch.currentStep);
+  markDeliveryNotRun(state.lastBatch.notRun);
+  await persistReviewState();
+  broadcastDeliveryState();
+  log('正式投递已阻止：' + message, 'error');
+  await finishDeliver();
+}
+
 async function finishDeliver() {
   if (state.lastBatch) {
     if (state.lastBatch.status === 'running') state.lastBatch.status = 'completed';
+    state.lastBatch.currentJobId = '';
+    state.lastBatch.currentStep = '';
     state.lastBatch.finishedAt = Date.now();
-    await chrome.storage.local.set({ lastBatch: state.lastBatch });
+    await persistReviewState();
   }
-  const ok = state.results.filter(r => r.ok).length;
-  const fail = state.results.length - ok;
-  state.phase = 'done'; pushPhase();
-  log('投递结束：成功 ' + ok + ' | 失败 ' + fail, fail ? 'error' : 'success');
-  chrome.runtime.sendMessage({ type: 'DONE', ok: ok, fail: fail, lastBatch: state.lastBatch }).catch(() => {});
+  const success = state.results.filter(result => result.ok).length;
+  const failed = state.results.filter(result => !result.ok).length;
+  state.phase = 'done';
+  pushPhase();
+  log('投递结束：成功 ' + success + ' | 失败 ' + failed, failed ? 'error' : 'success');
+  chrome.runtime.sendMessage({
+    type: 'DONE', ok: success, fail: failed, lastBatch: state.lastBatch,
+    screened: state.screened
+  }).catch(() => {});
 }
 
 async function currentStateSnapshot() {
   await hydrateReviewState();
   return {
     phase: state.phase,
+    jobs: state.jobs,
     screened: state.screened,
     previews: state.previews,
-    lastBatch: state.lastBatch
+    lastBatch: state.lastBatch,
+    greetingPlansState: state.greetingPlansState
   };
 }
 
+function handleAsyncRunError(error, fallbackPhase, label) {
+  log((label || '任务') + '失败：' + ((error && error.message) || '未知错误'), 'error');
+  state.phase = fallbackPhase || 'idle';
+  pushPhase();
+}
+
+async function resetCurrentBatch() {
+  state.jobs = [];
+  state.screened = [];
+  state.results = [];
+  state.previews = {};
+  state.lastBatch = null;
+  state.phase = 'idle';
+  await chrome.storage.local.remove(['sw_jobs', 'sw_screened', 'sw_previews', 'lastBatch']);
+  pushPhase();
+  log('已重置当前批次（保留配置、岗位进度和已投记录）', 'warn');
+}
+
 // ── 消息入口 ──
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'START_COLLECT') { runCollect(); sendResponse({ ok: true }); return; }
-  if (msg.type === 'START_PREVIEW') { runPreview(msg.jobIds); sendResponse({ ok: true }); return; }
-  if (msg.type === 'START_DELIVER') { runDeliver(msg.jobIds); sendResponse({ ok: true }); return; }
-  if (msg.type === 'TEST_LLM') {
-    testLLMConnection(msg.config || {})
-      .then(result => sendResponse({ ok: true, result: result }))
-      .catch(error => sendResponse({ ok: false, error: error && error.message ? error.message : '模型连接失败' }));
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'START_COLLECT') {
+    runCollect().catch(error => handleAsyncRunError(error, 'idle', '收集'));
+    sendResponse({ ok: true }); return;
+  }
+  if (message.type === 'START_PREVIEW') {
+    preparePreviewRun(message.jobIds)
+      .then(prepared => {
+        sendResponse({
+          ok: true,
+          result: { runId: prepared.runId, jobIds: prepared.ids, total: prepared.ids.length }
+        });
+        runPreview(prepared).catch(error => handlePreviewRunError(error, prepared));
+      })
+      .catch(error => sendResponse({ ok: false, error: error.message || '预演启动失败' }));
     return true;
   }
-  if (msg.type === 'CONFIRM_FILTER_PENDING') {
-    confirmFilterPending(msg.jobId)
+  if (message.type === 'START_DELIVER') {
+    runDeliver(message.jobIds).catch(error => handleAsyncRunError(error, 'review', '正式投递'));
+    sendResponse({ ok: true }); return;
+  }
+  if (message.type === 'TEST_LLM') {
+    testLLMConnection(message.config || {})
       .then(result => sendResponse({ ok: true, result: result }))
-      .catch(error => sendResponse({ ok: false, error: error && error.message ? error.message : '人工确认失败' }));
+      .catch(error => sendResponse({ ok: false, error: error.message || '模型连接失败' }));
     return true;
   }
-  if (msg.type === 'GET_TRACKER') {
+  if (message.type === 'CONFIRM_FILTER_PENDING') {
+    confirmFilterPending(message.jobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '人工确认失败' }));
+    return true;
+  }
+  if (message.type === 'RETRY_QUICK_SCREENING') {
+    retryQuickScreening(message.jobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '快速判断启动失败' }));
+    return true;
+  }
+  if (message.type === 'GENERATE_DETAILED_SCORE') {
+    generateDetailedScore(message.jobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '详细评分启动失败' }));
+    return true;
+  }
+  if (message.type === 'BATCH_APPROVE') {
+    batchApprove(message.jobIds)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '批量批准失败' }));
+    return true;
+  }
+  if (message.type === 'SET_REVIEW_DECISION') {
+    setReviewDecision(message.jobId, message.decision)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '审核状态更新失败' }));
+    return true;
+  }
+  if (message.type === 'OVERRIDE_SCORE') {
+    overrideScoreDecision(message.jobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || 'AI 评分覆盖失败' }));
+    return true;
+  }
+  if (message.type === 'SAVE_GREETING_PLANS') {
+    saveGreetingPlans(message.state)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '招呼方案保存失败' }));
+    return true;
+  }
+  if (message.type === 'INVALIDATE_PREVIEWS') {
+    invalidateStoredPreviews(message.reason)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '预演失效处理失败' }));
+    return true;
+  }
+  if (message.type === 'CONFIRM_PREVIEW') {
+    confirmPreview(message.jobId, message.aiOpening)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '预演确认失败' }));
+    return true;
+  }
+  if (message.type === 'UPDATE_PREVIEW_DRAFT') {
+    updatePreviewDraft(message.jobId, message.aiOpening, message.editedAt)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '预演草稿保存失败' }));
+    return true;
+  }
+  if (message.type === 'REGENERATE_PREVIEW') {
+    regeneratePreviewOpening(message.jobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || 'AI 开场重新生成失败' }));
+    return true;
+  }
+  if (message.type === 'GET_TRACKER') {
     hydrateTrackerRecords()
       .then(records => sendResponse({
         ok: true,
         result: { records: records, summary: JobTracker.summarize(records) }
       }))
-      .catch(error => sendResponse({ ok: false, error: error && error.message ? error.message : '进度读取失败' }));
+      .catch(error => sendResponse({ ok: false, error: error.message || '进度读取失败' }));
     return true;
   }
-  if (msg.type === 'UPDATE_TRACKER_STATUS') {
-    updateTrackerStatus(msg.jobId, msg.status)
+  if (message.type === 'UPDATE_TRACKER_STATUS') {
+    updateTrackerStatus(message.jobId, message.status)
       .then(result => sendResponse({ ok: true, result: result }))
-      .catch(error => sendResponse({ ok: false, error: error && error.message ? error.message : '进度更新失败' }));
+      .catch(error => sendResponse({ ok: false, error: error.message || '进度更新失败' }));
     return true;
   }
-  if (msg.type === 'PAUSE') { state.paused = true; log('已暂停', 'warn'); sendResponse({ ok: true }); return; }
-  if (msg.type === 'RESUME') { state.paused = false; log('继续', 'info'); sendResponse({ ok: true }); return; }
-  if (msg.type === 'STOP') { state.aborted = true; state.paused = false; log('已停止', 'warn'); state.phase = 'idle'; pushPhase(); sendResponse({ ok: true }); return; }
-  if (msg.type === 'RESET') {
-    state.jobs = []; state.screened = []; state.greetings = {}; state.results = [];
-    state.previews = {}; state.lastBatch = null; state.phase = 'idle';
-    chrome.storage.local.remove(['sw_jobs', 'sw_screened', 'sw_greetings', 'sw_previews', 'lastBatch']);
-    pushPhase(); log('已重置当前批次（保留已投记录）', 'warn'); sendResponse({ ok: true }); return;
+  if (message.type === 'PAUSE') { state.paused = true; log('已暂停', 'warn'); sendResponse({ ok: true }); return; }
+  if (message.type === 'RESUME') { state.paused = false; log('继续', 'info'); sendResponse({ ok: true }); return; }
+  if (message.type === 'STOP') {
+    state.aborted = true;
+    state.paused = false;
+    state.phase = 'idle';
+    log('已停止', 'warn');
+    pushPhase();
+    sendResponse({ ok: true });
+    return;
   }
-  if (msg.type === 'GET_STATE') {
+  if (message.type === 'RESET') {
+    resetCurrentBatch()
+      .then(() => sendResponse({ ok: true }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '当前批次清理失败' }));
+    return true;
+  }
+  if (message.type === 'GET_STATE') {
     currentStateSnapshot()
       .then(result => sendResponse({ ok: true, result: result }))
-      .catch(error => sendResponse({ ok: false, error: error && error.message ? error.message : '状态读取失败' }));
+      .catch(error => sendResponse({ ok: false, error: error.message || '状态读取失败' }));
     return true;
   }
 });
 
-chrome.storage.local.get('processed').then(r => { if (r.processed) state.processed = r.processed; });
+chrome.storage.local.get('processed').then(result => {
+  if (result.processed) state.processed = result.processed;
+});
