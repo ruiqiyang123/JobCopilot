@@ -381,3 +381,23 @@ test('后台逐岗位持久化投递结果并保留历史与配置', () => {
   assert.doesNotMatch(resetBody, /remove\([^)]*jobTrackerRecords/);
   assert.doesNotMatch(resetBody, /remove\([^)]*greetingPlansState/);
 });
+
+test('侧边栏只操作活动岗位并提供批次完成与下一批入口', () => {
+  const sidepanelHtml = read('src/sidepanel.html');
+  const sidepanelJs = read('src/sidepanel.js');
+
+  assert.ok(
+    sidepanelHtml.indexOf('batch-lifecycle.js') < sidepanelHtml.indexOf('sidepanel.js'),
+    '批次规则必须在侧边栏主脚本前加载'
+  );
+  assert.match(sidepanelHtml, /id="batchCompletion"/);
+  assert.match(sidepanelHtml, /id="batchCompletionSummary"/);
+  assert.match(sidepanelHtml, /id="btnContinueBatch"/);
+  assert.match(sidepanelHtml, /id="btnNextBatch"/);
+  assert.match(sidepanelHtml, /id="btnViewTracker"/);
+  assert.match(sidepanelJs, /BatchLifecycle\.activeJobs/);
+  assert.match(sidepanelJs, /DELIVERY_STATE_UPDATED/);
+  assert.match(sidepanelJs, /BatchLifecycle\.summarize/);
+  assert.match(sidepanelJs, /开始下一批/);
+  assert.match(sidepanelJs, /type: 'RESET'/);
+});

@@ -150,7 +150,7 @@ git commit -m "feat: persist per-job delivery outcomes"
 - 修改：`JobCopilot · AI/src/sidepanel.css`
 - 修改：`JobCopilot · AI/tests/extension-integration.test.js`
 
-- [ ] **步骤 1：增加失败的界面集成断言**
+- [x] **步骤 1：增加失败的界面集成断言**
 
 验证：
 
@@ -163,31 +163,31 @@ assert.match(sidepanelJs, /DELIVERY_STATE_UPDATED/);
 assert.match(sidepanelJs, /开始下一批/);
 ```
 
-- [ ] **步骤 2：运行集成测试验证失败**
+- [x] **步骤 2：运行集成测试验证失败**
 
 运行：`node --test tests/extension-integration.test.js`
 
 预期：FAIL，提示缺少活动队列或完成摘要。
 
-- [ ] **步骤 3：只渲染当前待处理岗位**
+- [x] **步骤 3：只渲染当前待处理岗位**
 
 `normalizedJobs()` 保留完整迁移数据；新增 `activeJobs()` 并让审核数量、页签、批准名单、预演启动和投递候选统一使用活动岗位。成功岗位不得出现在任何当前操作入口。
 
-- [ ] **步骤 4：实现批次完成摘要和下一批动作**
+- [x] **步骤 4：实现批次完成摘要和下一批动作**
 
 摘要读取 `BatchLifecycle.summarize(currentLastBatch)`，展示成功、失败、未执行。`btnNextBatch` 在有未解决岗位时只弹出一次确认，随后发送现有 `RESET`，清空当前 UI 并滚动到收集区；岗位进度和 `processed` 继续保留。
 
-- [ ] **步骤 5：处理实时更新和重新打开恢复**
+- [x] **步骤 5：处理实时更新和重新打开恢复**
 
 `DELIVERY_STATE_UPDATED` 和 `DONE` 都更新 `currentScreened/currentLastBatch` 并重绘。`restoreState()` 使用后台迁移后的岗位，因此旧成功岗位重新打开后也不会出现。
 
-- [ ] **步骤 6：运行相关测试验证通过**
+- [x] **步骤 6：运行相关测试验证通过**
 
 运行：`node --test tests/batch-lifecycle.test.js tests/review-workflow.test.js tests/extension-integration.test.js`
 
 预期：全部 PASS。
 
-- [ ] **步骤 7：提交侧边栏体验**
+- [x] **步骤 7：提交侧边栏体验**
 
 ```bash
 git add 'JobCopilot · AI/src/sidepanel.html' 'JobCopilot · AI/src/sidepanel.js' 'JobCopilot · AI/src/sidepanel.css' 'JobCopilot · AI/tests/extension-integration.test.js'

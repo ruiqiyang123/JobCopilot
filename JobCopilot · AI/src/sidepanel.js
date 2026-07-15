@@ -389,21 +389,29 @@ $('btnStop').addEventListener('click', () => {
 $('btnReset').addEventListener('click', () => {
   if (!window.confirm('重置当前筛选、审核和预演批次？岗位进度与已投记录会保留。')) return;
   chrome.runtime.sendMessage({ type: 'RESET' });
+  clearCurrentBatchUI();
+});
+
+function clearCurrentBatchUI() {
   currentScreened = [];
   currentPreviews = {};
   currentLastBatch = null;
   currentPreviewRun = null;
+  currentReviewTab = 'pending_review';
   renderReview();
   renderPreviews();
   setRunning(false);
-});
+  $('phaseText').textContent = '未开始';
+  $('progText').textContent = '';
+}
 
 // ── 审核队列 ──
 function normalizedJobs() { return currentScreened.map(ReviewWorkflow.normalizeJob); }
+function activeJobs() { return BatchLifecycle.activeJobs(normalizedJobs()); }
 
 function reviewCounts() {
   const counts = { pending_review: 0, needs_info: 0, approved: 0, rejected: 0, filtered_out: 0 };
-  normalizedJobs().forEach(job => { counts[job.reviewStatus] = (counts[job.reviewStatus] || 0) + 1; });
+  activeJobs().forEach(job => { counts[job.reviewStatus] = (counts[job.reviewStatus] || 0) + 1; });
   return counts;
 }
 
@@ -444,11 +452,15 @@ function renderReviewCard(job) {
   const reason = job.reason || (job.filterReasons || []).join('；') || '等待审核';
   const jd = String(job.jd || '').trim();
   const detailError = job.detailError ? '<div class="job-reason pending">详情读取：' + esc(job.detailError) + '</div>' : '';
+  const deliveryError = job.deliveryStatus === 'failed'
+    ? '<div class="job-reason skip">上次投递失败：' + esc(job.deliveryError || '未知错误') + '</div>' : '';
+  const statusText = job.deliveryStatus === 'failed'
+    ? '投递失败' : (job.deliveryStatus === 'not_run' ? '未执行' : reviewStatusLabel(job.reviewStatus));
   return '<article class="job-item"><div class="job-head"><div class="job-title">' + title + '</div>'
-    + '<span class="preview-status">' + esc(reviewStatusLabel(job.reviewStatus)) + '</span></div>'
+    + '<span class="preview-status' + (job.deliveryStatus === 'failed' ? ' failed' : '') + '">' + esc(statusText) + '</span></div>'
     + '<div class="job-meta">' + esc(jobFactsText(job)) + '</div>'
     + '<div class="job-reason ' + reasonClass(job) + '">' + esc(reason) + '</div>'
-    + detailError
+    + detailError + deliveryError
     + (jd ? '<div class="jd-summary">' + esc(jd) + '</div>' : '')
     + '<div class="job-actions">' + actions + '</div></article>';
 }
@@ -468,8 +480,8 @@ function renderReview() {
     const count = button.querySelector('span');
     if (count) count.textContent = counts[status] || 0;
   });
-  $('reviewCount').textContent = normalizedJobs().length + ' 个岗位';
-  const visible = normalizedJobs().filter(job => job.reviewStatus === currentReviewTab);
+  $('reviewCount').textContent = activeJobs().length + ' 个待处理岗位';
+  const visible = activeJobs().filter(job => job.reviewStatus === currentReviewTab);
   $('reviewList').innerHTML = visible.map(renderReviewCard).join('')
     || '<div class="empty">当前分类没有岗位</div>';
   $('approvedSummary').textContent = '已批准 ' + counts.approved + ' 个';
@@ -526,7 +538,7 @@ function renderPreviewRunError() {
 }
 
 $('btnPreview').addEventListener('click', async () => {
-  const ids = normalizedJobs().filter(job => job.reviewStatus === 'approved').map(job => job.id);
+  const ids = activeJobs().filter(job => job.reviewStatus === 'approved').map(job => job.id);
   if (!ids.length) return addLog('请先批准至少一个岗位', 'error');
   currentPreviewRun = PreviewRunState.start(ids, '');
   renderPreviews();
@@ -604,7 +616,7 @@ function renderPreviewItem(job, preview) {
 }
 
 function confirmedApprovedJobs() {
-  return normalizedJobs().filter(job => job.reviewStatus === 'approved'
+  return activeJobs().filter(job => job.reviewStatus === 'approved'
     && currentPreviews[job.id] && currentPreviews[job.id].status === 'confirmed');
 }
 
@@ -620,7 +632,7 @@ function renderDeliveryControls(ready) {
 
 function renderPreviews() {
   if (!$('previewList')) return;
-  const approved = normalizedJobs().filter(job => job.reviewStatus === 'approved');
+  const approved = activeJobs().filter(job => job.reviewStatus === 'approved');
   $('previewList').innerHTML = approved.length
     ? approved.map(job => renderPreviewItem(job, currentPreviews[job.id])).join('')
     : '<div class="empty">批准岗位后点击“预演已批准岗位”</div>';
@@ -628,7 +640,51 @@ function renderPreviews() {
   renderPreviewButton(approved.length);
   renderPreviewRunError();
   renderDeliveryControls(ready);
+  renderBatchCompletion();
 }
+
+function renderBatchCompletion() {
+  const batch = currentLastBatch;
+  const finished = batch && batch.mode === 'live' && batch.status !== 'running' && batch.finishedAt;
+  $('batchCompletion').classList.toggle('hidden', !finished);
+  if (!finished) return;
+  const summary = BatchLifecycle.summarize(batch);
+  $('batchCompletionTitle').textContent = summary.failed
+    ? '本批投递已停止' : '本批投递已完成';
+  $('batchCompletionSummary').textContent = '成功 ' + summary.succeeded
+    + ' · 失败 ' + summary.failed + ' · 未执行 ' + summary.notRun;
+  $('btnContinueBatch').classList.toggle('hidden', !BatchLifecycle.hasUnresolved(normalizedJobs()));
+}
+
+$('btnContinueBatch').addEventListener('click', () => {
+  currentReviewTab = 'approved';
+  renderReview();
+  $('reviewCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+$('btnViewTracker').addEventListener('click', () => {
+  $('trackerFilter').value = 'contacted';
+  $('trackerBody').classList.remove('hidden');
+  renderTracker();
+  $('trackerCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+$('btnNextBatch').addEventListener('click', async () => {
+  const unresolved = BatchLifecycle.hasUnresolved(normalizedJobs());
+  if (unresolved && !window.confirm('当前还有失败、未执行或待审核岗位。开始下一批后，它们会离开当前工作区，岗位进度与已投记录仍会保留。确认开始下一批？')) return;
+  $('btnNextBatch').disabled = true;
+  try {
+    const response = await runtimeMessage({ type: 'RESET' });
+    if (!response.ok) throw new Error(response.error || '开始下一批失败');
+    clearCurrentBatchUI();
+    $('btnCollect').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    addLog('当前批次已清理，可以开始下一批', 'success');
+  } catch (error) {
+    addLog(error.message, 'error');
+  } finally {
+    $('btnNextBatch').disabled = false;
+  }
+});
 
 $('previewList').addEventListener('input', event => {
   const textarea = event.target.closest('[data-preview-opening]');
@@ -859,7 +915,7 @@ chrome.runtime.onMessage.addListener(message => {
   }
   if (message.type === 'PREVIEW_PROGRESS') {
     if (!currentPreviewRun) {
-      const ids = normalizedJobs().filter(job => job.reviewStatus === 'approved').map(job => job.id);
+      const ids = activeJobs().filter(job => job.reviewStatus === 'approved').map(job => job.id);
       currentPreviewRun = PreviewRunState.start(ids, message.runId || '');
     }
     currentPreviewRun = PreviewRunState.applyProgress(currentPreviewRun, message);
@@ -887,10 +943,19 @@ chrome.runtime.onMessage.addListener(message => {
     trackerRecords = message.records || [];
     renderTracker();
   }
+  if (message.type === 'DELIVERY_STATE_UPDATED') {
+    currentScreened = message.screened || currentScreened;
+    currentLastBatch = message.lastBatch || currentLastBatch;
+    renderReview();
+    renderPreviews();
+  }
   if (message.type === 'DONE') {
     currentLastBatch = message.lastBatch || null;
+    currentScreened = message.screened || currentScreened;
     setRunning(false);
     $('progText').textContent = '';
+    renderReview();
+    renderPreviews();
     refreshTracker().catch(() => {});
   }
 });

@@ -132,6 +132,15 @@
       <div id="previewList"><div class="empty">批准岗位后点击“预演已批准岗位”</div></div>
       <button class="btn-live" id="btnDeliver" disabled>暂无可正式投递岗位</button>
       <div id="deliverDisabledReason" class="disabled-reason">需要先批准岗位并确认预演</div>
+      <div id="batchCompletion" class="batch-completion hidden" role="status" aria-live="polite">
+        <strong id="batchCompletionTitle">本批投递已结束</strong>
+        <div id="batchCompletionSummary" class="batch-summary">成功 0 · 失败 0 · 未执行 0</div>
+        <div class="batch-actions">
+          <button type="button" class="btn-secondary" id="btnContinueBatch">处理剩余岗位</button>
+          <button type="button" class="btn-go compact" id="btnNextBatch">开始下一批</button>
+          <button type="button" class="btn-secondary" id="btnViewTracker">查看岗位进度</button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -162,6 +171,7 @@
   <script src="job-detail.js"></script>
   <script src="greeting-plans.js"></script>
   <script src="review-workflow.js"></script>
+  <script src="batch-lifecycle.js"></script>
   <script src="preview-run-state.js"></script>
   <script src="job-tracker.js"></script>
   <script src="storage-utils.js"></script>
