@@ -481,3 +481,18 @@ test('AI 筛选使用六维可解释评分并由后台校验和分类', () => {
   assert.match(sidepanelJs, /matchDimensions/);
   assert.match(sidepanelJs, /data-action="override-score"/);
 });
+
+test('侧边栏提供可命名筛选方案、旧配置迁移和条件摘要', () => {
+  const html = read('src/sidepanel.html');
+  const js = read('src/sidepanel.js');
+
+  assert.match(html, /id="searchProfileSelect"/);
+  assert.match(html, /id="searchProfileName"/);
+  assert.match(html, /id="newSearchProfile"/);
+  assert.match(html, /id="deleteSearchProfile"/);
+  assert.match(html, /id="filterConditionSummary"/);
+  assert.ok(html.indexOf('search-profiles.js') < html.indexOf('sidepanel.js'));
+  assert.match(js, /SearchProfiles\.normalizeState/);
+  assert.match(js, /SearchProfiles\.upsertProfile/);
+  assert.match(js, /searchProfilesState/);
+});

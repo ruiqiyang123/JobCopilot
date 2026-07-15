@@ -4,7 +4,7 @@ const BASIC_CFG_FIELDS = ['resumeText', 'keyword', 'city', 'count'];
 const LLM_STORAGE_FIELDS = ['llmProvider', 'llmApiKey', 'llmBaseUrl', 'llmModel', 'llmAuthType'];
 const SEARCH_CFG_FIELDS = ['searchMatchMode', 'keywordExpansionEnabled'];
 const LOAD_FIELDS = BASIC_CFG_FIELDS.concat(LLM_STORAGE_FIELDS, [
-  'resumeImage', 'dsKey', 'jobFilterConfig', 'greetingPlansState'
+  'resumeImage', 'dsKey', 'jobFilterConfig', 'greetingPlansState', 'searchProfilesState'
 ]).concat(SEARCH_CFG_FIELDS);
 
 let currentScreened = [];
@@ -15,6 +15,7 @@ let trackerRecords = [];
 let currentReviewTab = 'pending_review';
 let editingResumeImage = '';
 let currentPreviewRun = null;
+let searchProfilesState = null;
 const confirmingPreviewIds = new Set();
 const regeneratingPreviewIds = new Set();
 const previewActionErrors = {};
@@ -198,6 +199,57 @@ function readSearchConfig() {
   });
 }
 
+function currentSearchProfileData() {
+  return {
+    keyword: $('keyword').value,
+    city: $('city').value,
+    count: $('count').value,
+    searchMatchMode: $('searchMatchMode').value,
+    keywordExpansionEnabled: $('keywordExpansionEnabled').checked,
+    jobFilterConfig: readJobFilterForm()
+  };
+}
+
+function renderConditionSummary() {
+  try {
+    const config = readJobFilterForm();
+    const parts = [$('city').value.trim() || '未选城市'];
+    if (config.experienceEnabled) parts.push(config.experienceValues.map(value => JobFilters.labelFor('experience', value)).join('/'));
+    if (config.companySizeEnabled) parts.push(config.companySizeValues.map(value => JobFilters.labelFor('companySize', value)).join('/'));
+    if (config.employmentTypeEnabled) parts.push(config.employmentTypeValues.map(value => JobFilters.labelFor('employmentType', value)).join('/'));
+    if (config.publishedTimeEnabled) parts.push(config.publishedWithinDays === 0 ? '当天' : config.publishedWithinDays + ' 天内');
+    parts.push(matchDecisionLabelForMode($('searchMatchMode').value));
+    $('filterConditionSummary').textContent = parts.join('｜');
+  } catch (error) {
+    $('filterConditionSummary').textContent = '方案条件尚未填写完整：' + error.message;
+  }
+}
+
+function matchDecisionLabelForMode(mode) {
+  return ({ precise: '精准匹配', balanced: '平衡匹配', loose: '宽松匹配' })[mode] || '平衡匹配';
+}
+
+function applySearchProfile(profile) {
+  const source = SearchProfiles.normalizeProfile(profile);
+  $('keyword').value = source.keyword;
+  $('city').value = source.city;
+  $('count').value = source.count;
+  $('searchMatchMode').value = source.searchMatchMode;
+  $('keywordExpansionEnabled').checked = source.keywordExpansionEnabled;
+  $('searchProfileName').value = source.name;
+  applyJobFilterConfig(source.jobFilterConfig);
+  renderKeywordSearchSummary();
+  renderConditionSummary();
+}
+
+function renderSearchProfilePicker() {
+  searchProfilesState = SearchProfiles.normalizeState(searchProfilesState);
+  $('searchProfileSelect').innerHTML = searchProfilesState.profiles.map(profile =>
+    '<option value="' + esc(profile.id) + '"' + (profile.id === searchProfilesState.selectedProfileId ? ' selected' : '')
+      + '>' + esc(profile.name) + '</option>'
+  ).join('');
+}
+
 function renderKeywordSearchSummary() {
   try {
     const terms = SearchStrategy.resolveTerms({
@@ -276,6 +328,14 @@ async function persistCurrentConfig() {
   data.searchMatchMode = searchConfig.matchMode;
   data.keywordExpansionEnabled = searchConfig.keywordExpansionEnabled;
   BASIC_CFG_FIELDS.forEach(field => { data[field] = $(field).value.trim(); });
+  const selected = SearchProfiles.selectedProfile(searchProfilesState);
+  searchProfilesState = SearchProfiles.upsertProfile(searchProfilesState, Object.assign(
+    {}, selected, currentSearchProfileData(), {
+      name: $('searchProfileName').value.trim() || selected.name,
+      updatedAt: Date.now()
+    }
+  ));
+  data.searchProfilesState = searchProfilesState;
   await localStorageSet(data);
   const invalidated = await runtimeMessage({
     type: 'INVALIDATE_PREVIEWS', reason: '基础配置已变化，需要重新预演'
@@ -311,12 +371,19 @@ async function loadConfig() {
   $('llmModel').value = data.llmModel || '';
   $('llmAuthType').value = data.llmAuthType || 'bearer';
   applyProviderUI(false);
-  applyJobFilterConfig(data.jobFilterConfig);
+  searchProfilesState = SearchProfiles.normalizeState(data.searchProfilesState, {
+    keyword: data.keyword, city: data.city, count: data.count,
+    searchMatchMode: data.searchMatchMode,
+    keywordExpansionEnabled: data.keywordExpansionEnabled,
+    jobFilterConfig: data.jobFilterConfig
+  });
+  if (!data.searchProfilesState) await localStorageSet({ searchProfilesState: searchProfilesState });
+  renderSearchProfilePicker();
+  applySearchProfile(SearchProfiles.selectedProfile(searchProfilesState));
   greetingPlansState = GreetingPlans.normalizeState(data.greetingPlansState, {
     resumeImage: data.resumeImage || ''
   });
   renderPlanPicker();
-  renderKeywordSearchSummary();
 }
 
 $('llmProvider').addEventListener('change', () => {
@@ -339,8 +406,36 @@ $('educationFilterEnabled').addEventListener('change', () => syncFilterEnabled('
 $('keyword').addEventListener('input', renderKeywordSearchSummary);
 $('searchMatchMode').addEventListener('change', renderKeywordSearchSummary);
 $('keywordExpansionEnabled').addEventListener('change', renderKeywordSearchSummary);
+$('cfgBody').addEventListener('change', renderConditionSummary);
+$('searchProfileSelect').addEventListener('change', async event => {
+  try {
+    searchProfilesState = SearchProfiles.selectProfile(searchProfilesState, event.target.value);
+    renderSearchProfilePicker();
+    applySearchProfile(SearchProfiles.selectedProfile(searchProfilesState));
+    await localStorageSet({ searchProfilesState: searchProfilesState });
+  } catch (error) { addLog(error.message, 'error'); }
+});
+$('newSearchProfile').addEventListener('click', async () => {
+  try {
+    const profile = SearchProfiles.createProfile(currentSearchProfileData(), '新筛选方案');
+    searchProfilesState = SearchProfiles.upsertProfile(searchProfilesState, profile);
+    renderSearchProfilePicker();
+    applySearchProfile(profile);
+    await localStorageSet({ searchProfilesState: searchProfilesState });
+  } catch (error) { addLog(error.message, 'error'); }
+});
+$('deleteSearchProfile').addEventListener('click', async () => {
+  const profile = SearchProfiles.selectedProfile(searchProfilesState);
+  if (!window.confirm('删除筛选方案“' + profile.name + '”？')) return;
+  try {
+    searchProfilesState = SearchProfiles.removeProfile(searchProfilesState, profile.id);
+    renderSearchProfilePicker();
+    applySearchProfile(SearchProfiles.selectedProfile(searchProfilesState));
+    await localStorageSet({ searchProfilesState: searchProfilesState });
+  } catch (error) { addLog(error.message, 'error'); }
+});
 $('saveCfg').addEventListener('click', async () => {
-  try { await persistCurrentConfig(); showSaved('saved'); }
+  try { await persistCurrentConfig(); renderSearchProfilePicker(); renderConditionSummary(); showSaved('saved'); }
   catch (error) { addLog(error.message, 'error'); }
 });
 $('testLlm').addEventListener('click', async () => {

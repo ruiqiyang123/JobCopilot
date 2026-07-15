@@ -41,6 +41,15 @@
 
       <label>简历文字（用于筛选和生成开场）</label>
       <textarea id="resumeText" rows="6" placeholder="粘贴技能、项目、工作经历和教育背景"></textarea>
+      <label>当前筛选方案</label>
+      <div class="plan-picker">
+        <select id="searchProfileSelect"></select>
+        <button class="icon-btn" id="newSearchProfile" type="button">复制新建</button>
+        <button class="icon-btn danger" id="deleteSearchProfile" type="button">删除</button>
+      </div>
+      <label>方案名称</label>
+      <input type="text" id="searchProfileName" placeholder="深圳 AI 产品｜100 人以上">
+      <div id="filterConditionSummary" class="condition-summary" aria-live="polite"></div>
       <label>岗位关键词（支持逗号、顿号或换行分隔）</label>
       <textarea id="keyword" rows="2" placeholder="AI 产品经理、AI Agent 产品经理"></textarea>
       <div class="grid-two">
@@ -228,6 +237,7 @@
   <script src="batch-lifecycle.js"></script>
   <script src="search-strategy.js"></script>
   <script src="match-scoring.js"></script>
+  <script src="search-profiles.js"></script>
   <script src="preview-run-state.js"></script>
   <script src="job-tracker.js"></script>
   <script src="storage-utils.js"></script>
