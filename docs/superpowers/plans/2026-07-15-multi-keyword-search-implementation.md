@@ -16,10 +16,10 @@
 - 创建：`JobCopilot · AI/src/search-strategy.js`
 - 创建：`JobCopilot · AI/tests/search-strategy.test.js`
 
-- [ ] 先编写并运行失败测试，覆盖中文/英文逗号和换行解析、精准/平衡/宽松模式、大小写去重、跨关键词岗位去重和 `matchedSearchTerms` 合并。
-- [ ] 实现 `parseKeywords`、`normalizeConfig`、`resolveTerms`、`mergeJobs`、`roundTarget`。
-- [ ] 运行 `node --test tests/search-strategy.test.js`，预期全部通过。
-- [ ] 提交 `feat: add multi-keyword search strategy`。
+- [x] 先编写并运行失败测试，覆盖中文/英文逗号和换行解析、精准/平衡/宽松模式、大小写去重、跨关键词岗位去重和 `matchedSearchTerms` 合并。
+- [x] 实现 `parseKeywords`、`normalizeConfig`、`resolveTerms`、`mergeJobs`、`roundTarget`。
+- [x] 运行 `node --test tests/search-strategy.test.js`，预期全部通过。
+- [x] 提交 `feat: add multi-keyword search strategy`。
 
 ### 任务 2：后台公平轮询收集
 
