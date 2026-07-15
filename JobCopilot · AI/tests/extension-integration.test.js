@@ -622,3 +622,15 @@ test('岗位审核与投递预演使用固定窗口且只滚动列表', () => {
   assert.match(css, /\.fixed-list-scroll\s*\{[^}]*overscroll-behavior:\s*contain/s);
   assert.match(css, /\.fixed-list-scroll\s*\{[^}]*scrollbar-gutter:\s*stable/s);
 });
+
+test('列表重渲染保留滚动位置且分类切换回到顶部', () => {
+  const js = read('src/sidepanel.js');
+
+  assert.match(js, /function renderScrollableList\(listId, html, reset\)/);
+  assert.match(js, /ListScrollState\.target\(list, reset\)/);
+  assert.match(js, /requestAnimationFrame\(\(\) => ListScrollState\.apply\(list, target\)\)/);
+  assert.match(js, /function renderReview\(options\)/);
+  assert.match(js, /renderScrollableList\(\s*'reviewList',[\s\S]*resetScroll/);
+  assert.match(js, /renderReview\(\{ resetScroll: true \}\)/);
+  assert.match(js, /renderScrollableList\(\s*'previewList',[\s\S]*false/);
+});

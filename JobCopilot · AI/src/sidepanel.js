@@ -46,6 +46,13 @@ function runtimeMessage(message) {
   });
 }
 
+function renderScrollableList(listId, html, reset) {
+  const list = $(listId);
+  const target = ListScrollState.target(list, reset);
+  list.innerHTML = html;
+  window.requestAnimationFrame(() => ListScrollState.apply(list, target));
+}
+
 async function localStorageSet(values) {
   try { await chrome.storage.local.set(values); }
   catch (error) { throw StorageUtils.toUserError(error); }
@@ -785,7 +792,8 @@ function reviewStatusLabel(status) {
   })[status] || status;
 }
 
-function renderReview() {
+function renderReview(options) {
+  const resetScroll = Boolean(options && options.resetScroll);
   const counts = reviewCounts();
   document.querySelectorAll('[data-review-tab]').forEach(button => {
     const status = button.dataset.reviewTab;
@@ -795,8 +803,11 @@ function renderReview() {
   });
   $('reviewCount').textContent = activeJobs().length + ' 个待处理岗位';
   const visible = MatchScoring.sortJobs(activeJobs()).filter(job => job.reviewStatus === currentReviewTab);
-  $('reviewList').innerHTML = visible.map(renderReviewCard).join('')
-    || '<div class="empty">当前分类没有岗位</div>';
+  renderScrollableList(
+    'reviewList',
+    visible.map(renderReviewCard).join('') || '<div class="empty">当前分类没有岗位</div>',
+    resetScroll
+  );
   renderBulkReviewActions();
   $('approvedSummary').textContent = '已批准 ' + counts.approved + ' 个';
   renderPreviewButton(counts.approved);
@@ -862,7 +873,7 @@ $('reviewTabs').addEventListener('click', event => {
   const button = event.target.closest('[data-review-tab]');
   if (!button) return;
   currentReviewTab = button.dataset.reviewTab;
-  renderReview();
+  renderReview({ resetScroll: true });
 });
 
 $('reviewList').addEventListener('click', async event => {
@@ -1157,9 +1168,13 @@ function renderDeliveryControls(ready) {
 function renderPreviews() {
   if (!$('previewList')) return;
   const approved = activeJobs().filter(job => job.reviewStatus === 'approved');
-  $('previewList').innerHTML = approved.length
-    ? approved.map(job => renderPreviewItem(job, currentPreviews[job.id])).join('')
-    : '<div class="empty">批准岗位后点击“预演已批准岗位”</div>';
+  renderScrollableList(
+    'previewList',
+    approved.length
+      ? approved.map(job => renderPreviewItem(job, currentPreviews[job.id])).join('')
+      : '<div class="empty">批准岗位后点击“预演已批准岗位”</div>',
+    false
+  );
   const ready = confirmedApprovedJobs();
   renderPreviewButton(approved.length);
   renderPreviewRunError();
