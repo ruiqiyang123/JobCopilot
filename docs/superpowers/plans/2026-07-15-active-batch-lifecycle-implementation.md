@@ -22,6 +22,7 @@
 - 修改 `JobCopilot · AI/src/sidepanel.css`：完成摘要、状态数量和按钮样式。
 - 修改 `JobCopilot · AI/tests/extension-integration.test.js`：验证加载顺序、成功移出和保留数据边界。
 - 修改 `JobCopilot · AI/manifest.json` 与 `JobCopilot · AI/README.md`：版本和使用说明。
+- 修改 `README.md`：同步仓库首页的连续批次使用说明。
 
 ### 任务 1：建立可测试的批次状态边界
 
@@ -201,17 +202,17 @@ git commit -m "feat: finish and clear active delivery batches"
 - 修改：`JobCopilot · AI/README.md`
 - 修改：`docs/superpowers/plans/2026-07-15-active-batch-lifecycle-implementation.md`
 
-- [ ] **步骤 1：更新版本和用户说明**
+- [x] **步骤 1：更新版本和用户说明**
 
 将扩展版本从 `1.1.5` 升为 `1.2.0`。README 明确：成功岗位自动移入岗位进度；失败和未执行保留；“开始下一批”只清理当前工作区。
 
-- [ ] **步骤 2：运行完整测试**
+- [x] **步骤 2：运行完整测试**
 
 运行：`node --test tests/*.test.js`
 
 预期：全部 PASS。
 
-- [ ] **步骤 3：运行静态和敏感信息检查**
+- [x] **步骤 3：运行静态和敏感信息检查**
 
 ```bash
 node --check src/batch-lifecycle.js
@@ -224,14 +225,14 @@ git grep -nE 'tp-[A-Za-z0-9]{20,}|ak_[A-Za-z0-9]{20,}' -- . ':!docs/superpowers/
 
 预期：语法和 Manifest 检查成功，差异检查无输出，密钥检查无输出。
 
-- [ ] **步骤 4：更新计划勾选并提交**
+- [x] **步骤 4：更新计划勾选并提交**
 
 ```bash
 git add 'JobCopilot · AI/manifest.json' 'JobCopilot · AI/README.md' 'docs/superpowers/plans/2026-07-15-active-batch-lifecycle-implementation.md'
 git commit -m "docs: complete active batch lifecycle plan"
 ```
 
-- [ ] **步骤 5：检查最终分支状态**
+- [x] **步骤 5：检查最终分支状态**
 
 运行：`git status --short && git log -6 --oneline`
 
