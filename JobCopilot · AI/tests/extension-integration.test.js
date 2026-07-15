@@ -61,6 +61,8 @@ test('侧边栏提供模型配置、迁移、域名授权和测试连接', () =>
 test('Manifest 固定授权内置服务商，并把其他 HTTPS 域名设为可选', () => {
   const manifest = JSON.parse(read('manifest.json'));
 
+  assert.equal(manifest.version, '1.8.2');
+  assert.match(read('../README.md'), /version-1\.8\.2-/);
   assert.ok(manifest.host_permissions.includes('https://api.xiaomimimo.com/*'));
   assert.ok(manifest.host_permissions.includes('https://api.deepseek.com/*'));
   assert.ok(manifest.host_permissions.includes('https://api.longcat.chat/*'));
