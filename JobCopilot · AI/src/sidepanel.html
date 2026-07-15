@@ -179,6 +179,10 @@
       <button data-review-tab="filtered_out">已排除 <span>0</span></button>
     </div>
     <div class="card-b review-body">
+      <div id="bulkCandidateActions" class="bulk-review-actions hidden">
+        <label><input type="checkbox" id="selectAllCandidates"> 全选待补充岗位</label>
+        <button type="button" id="btnBulkConfirmCandidates" class="approve">一键确认符合（0）</button>
+      </div>
       <div id="bulkReviewActions" class="bulk-review-actions hidden">
         <label><input type="checkbox" id="selectAllRecommended"> 全选推荐岗位</label>
         <button type="button" id="btnBulkApprove" class="approve">一键批准推荐岗位（0）</button>
@@ -197,6 +201,10 @@
       <div class="safety-note">预演只生成最终内容；确认后才可进入正式投递。</div>
       <div id="previewRunError" class="preview-run-error hidden" role="alert" aria-live="assertive"></div>
       <button type="button" class="btn-secondary hidden" id="btnRetryPreviewFailures">仅重试预演失败岗位</button>
+      <div id="bulkPreviewActions" class="bulk-review-actions bulk-preview-actions hidden">
+        <label><input type="checkbox" id="selectAllPreviews"> 全选待确认预演</label>
+        <button type="button" id="btnBulkConfirmPreviews" class="approve">一键确认预演（0）</button>
+      </div>
       <div id="previewList"><div class="empty">批准岗位后点击“预演已批准岗位”</div></div>
       <button class="btn-live" id="btnDeliver" disabled>暂无可正式投递岗位</button>
       <div id="deliverDisabledReason" class="disabled-reason">需要先批准岗位并确认预演</div>

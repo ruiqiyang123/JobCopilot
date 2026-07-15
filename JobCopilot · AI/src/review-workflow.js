@@ -14,6 +14,9 @@
 
   function defaultStatus(job) {
     const source = job || {};
+    if (source.scoreOverride === true && source.filterStatus === 'pass' && source.match === true) {
+      return 'pending_review';
+    }
     if (source.filterStatus === 'pending' || source.matchDecision === 'needs_info') return 'needs_info';
     if (source.filterStatus === 'fail' || source.matchDecision === 'excluded' || source.match === false) return 'filtered_out';
     return 'pending_review';
@@ -52,21 +55,66 @@
     source.scoreOverride = true;
     source.scoreOverrideAt = Number.isFinite(at) ? at : Date.now();
     source.match = true;
+    source.aiScreeningStatus = 'idle';
+    source.aiScreeningError = '';
     source.reviewStatus = 'pending_review';
     source.reviewUpdatedAt = source.scoreOverrideAt;
     return source;
+  }
+
+  function isManualConfirmable(job) {
+    const source = normalizeJob(job);
+    return source.reviewStatus === 'needs_info'
+      && (source.filterStatus === 'pending' || source.filterStatus === 'pass')
+      && source.deliveryStatus !== 'succeeded';
+  }
+
+  function confirmManualCandidate(job, at) {
+    const source = normalizeJob(job);
+    if (!isManualConfirmable(source)) throw new Error('该岗位当前不能人工确认');
+    if (source.filterStatus !== 'pass') throw new Error('岗位缺失信息尚未完成人工确认');
+    source.scoreOverride = true;
+    source.scoreOverrideAt = Number.isFinite(at) ? at : Date.now();
+    source.match = true;
+    source.aiScreeningStatus = 'idle';
+    source.aiScreeningError = '';
+    source.reviewStatus = 'pending_review';
+    source.reviewUpdatedAt = source.scoreOverrideAt;
+    return source;
+  }
+
+  function confirmManyCandidates(jobs, jobIds, at) {
+    const requested = new Set(Array.isArray(jobIds) ? jobIds.map(String) : []);
+    const confirmedIds = [];
+    const seen = new Set();
+    const updatedAt = Number.isFinite(at) ? at : Date.now();
+    const updated = normalizeJobs(jobs).map(job => {
+      const id = String(job.id);
+      if (!requested.has(id)) return job;
+      seen.add(id);
+      if (!isManualConfirmable(job) || job.filterStatus !== 'pass') return job;
+      confirmedIds.push(job.id);
+      return confirmManualCandidate(job, updatedAt);
+    });
+    const confirmed = new Set(confirmedIds.map(String));
+    const skippedIds = [];
+    requested.forEach(id => {
+      if (!seen.has(id) || !confirmed.has(id)) skippedIds.push(id);
+    });
+    return { jobs: updated, confirmedIds: confirmedIds, skippedIds: skippedIds };
   }
 
   function isBulkApprovable(job) {
     const source = normalizeJob(job);
     const recommended = source.quickDecision === 'recommended'
       || source.matchDecision === 'recommended';
+    const manuallySelected = source.scoreOverride === true;
     return source.reviewStatus === 'pending_review'
       && source.filterStatus === 'pass'
       && source.match === true
-      && recommended
+      && (recommended || manuallySelected)
       && source.deliveryStatus !== 'succeeded'
-      && source.aiScreeningStatus !== 'running';
+      && (source.aiScreeningStatus !== 'running' || manuallySelected);
   }
 
   function approveMany(jobs, jobIds, at) {
@@ -153,6 +201,64 @@
     next.confirmedAt = Number.isFinite(at) ? at : Date.now();
     next.error = '';
     return next;
+  }
+
+  function previewBulkConfirmability(job, preview, aiOpening, blocked) {
+    if (!job) return { ok: false, reason: '找不到对应岗位' };
+    const normalized = normalizeJob(job);
+    if (normalized.reviewStatus !== 'approved') return { ok: false, reason: '岗位尚未批准' };
+    if (normalized.deliveryStatus === 'succeeded') return { ok: false, reason: '岗位已经投递' };
+    if (blocked) return { ok: false, reason: '预演正在重新生成' };
+    const source = preview || {};
+    if (!source.jobId) return { ok: false, reason: '找不到岗位预演' };
+    if (String(source.jobId) !== String(normalized.id)) return { ok: false, reason: '岗位预演身份不一致' };
+    if (source.status === 'confirmed') return { ok: false, reason: '岗位预演已经确认' };
+    if (source.status === 'expired') {
+      return { ok: false, reason: '岗位预演已经过期' + (source.error ? '：' + source.error : '') };
+    }
+    if (source.status === 'failed') return { ok: false, reason: source.error || '岗位预演生成失败' };
+    if (source.status !== 'draft') return { ok: false, reason: '岗位预演当前不能确认' };
+    if (!source.inputFingerprint || source.inputFingerprintVersion !== 2 || !source.inputFingerprintParts) {
+      return { ok: false, reason: '预演数据不完整，需要重新生成' };
+    }
+    if (!(source.enabledSteps || []).length) return { ok: false, reason: '预演没有可发送内容' };
+    const opening = String(aiOpening === undefined ? source.aiOpening : aiOpening).trim();
+    if ((source.enabledSteps || []).indexOf('aiOpening') >= 0 && !opening) {
+      return { ok: false, reason: 'AI 个性化开场不能为空' };
+    }
+    return { ok: true, reason: '' };
+  }
+
+  function confirmManyPreviews(previews, jobs, jobIds, openingsByJobId, at, blockedJobIds) {
+    const sourcePreviews = previews || {};
+    const updated = Object.assign({}, sourcePreviews);
+    const jobMap = new Map(normalizeJobs(jobs).map(job => [String(job.id), job]));
+    const requested = Array.from(new Set(Array.isArray(jobIds) ? jobIds.map(String) : []));
+    const openings = openingsByJobId || {};
+    const blocked = new Set(Array.isArray(blockedJobIds) ? blockedJobIds.map(String) : []);
+    const confirmedIds = [];
+    const skipped = [];
+    const confirmedAt = Number.isFinite(at) ? at : Date.now();
+
+    requested.forEach(id => {
+      const preview = sourcePreviews[id];
+      const opening = Object.prototype.hasOwnProperty.call(openings, id)
+        ? openings[id]
+        : (preview && preview.aiOpening);
+      const eligibility = previewBulkConfirmability(jobMap.get(id), preview, opening, blocked.has(id));
+      if (!eligibility.ok) {
+        skipped.push({ id: id, reason: eligibility.reason });
+        return;
+      }
+      try {
+        updated[id] = confirmPreview(preview, opening, confirmedAt);
+        confirmedIds.push(id);
+      } catch (error) {
+        skipped.push({ id: id, reason: error.message || '预演确认失败' });
+      }
+    });
+
+    return { previews: updated, confirmedIds: confirmedIds, skipped: skipped };
   }
 
   function regeneratePreview(preview, inputs, aiOpening, at) {
@@ -247,12 +353,17 @@
     normalizeJobs: normalizeJobs,
     setDecision: setDecision,
     overrideScore: overrideScore,
+    isManualConfirmable: isManualConfirmable,
+    confirmManualCandidate: confirmManualCandidate,
+    confirmManyCandidates: confirmManyCandidates,
     isBulkApprovable: isBulkApprovable,
     approveMany: approveMany,
     inputFingerprintParts: inputFingerprintParts,
     inputFingerprint: inputFingerprint,
     createPreview: createPreview,
     confirmPreview: confirmPreview,
+    previewBulkConfirmability: previewBulkConfirmability,
+    confirmManyPreviews: confirmManyPreviews,
     regeneratePreview: regeneratePreview,
     isPreviewReady: isPreviewReady,
     stripEmbeddedImages: stripEmbeddedImages,

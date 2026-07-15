@@ -121,6 +121,7 @@ input[type=file] { width: 100%; font-size: 11px; }
 .bulk-review-actions input { width: auto; margin: 0; }
 .bulk-review-actions button { border-color: #66b383; background: #fff; color: var(--green); font-weight: 700; }
 .bulk-review-actions button:disabled { opacity: .5; }
+.bulk-preview-actions { margin-top: 8px; }
 .quick-status { display: flex; align-items: center; gap: 7px; margin-top: 7px; padding: 7px 8px; border-radius: 6px; font-size: 11px; }
 .quick-status.running, .quick-status.pending { background: #fff7e7; color: #985d08; }
 .quick-status.recommended { background: #edf8f1; color: #267746; }

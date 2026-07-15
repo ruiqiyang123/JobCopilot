@@ -23,6 +23,7 @@ let state = {
 };
 const quickScreeningTasks = new Set();
 const detailedScoringTasks = new Set();
+const regeneratingPreviewTasks = new Set();
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -849,20 +850,14 @@ async function confirmFilterPending(jobId) {
   const job = findJob(jobId);
   if (!job) throw new Error('找不到待补充岗位');
   const confirmed = JobFilters.confirmPending(job, cfg.jobFilterConfig);
-  const updated = syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, confirmed, {
-    match: false,
+  const updated = syncJob(ReviewWorkflow.confirmManualCandidate(Object.assign({}, confirmed, {
     matchDecision: 'needs_info',
     quickDecision: 'needs_info',
-    quickReason: '',
-    aiScreeningStatus: 'running',
-    aiScreeningError: '',
     reviewStatus: 'needs_info',
-    reviewUpdatedAt: Date.now(),
-    reason: (confirmed.filterReasons || []).join('；') + '；AI：快速判断中…'
-  })));
+    reason: (confirmed.filterReasons || []).join('；') + '；已人工确认加入候选'
+  }), Date.now()));
   await persistReviewState();
   broadcastScreened();
-  runQuickScreeningForJob(jobId, cfg).catch(() => {});
   return { screened: state.screened, job: updated };
 }
 
@@ -880,19 +875,23 @@ async function runQuickScreeningForJob(jobId, cfg) {
   try {
     const result = await screenJob(cfg, job);
     const latest = findJob(jobId) || job;
-    syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, result, {
-      reviewStatus: '',
-      reviewUpdatedAt: Date.now(),
-      reason: (latest.filterReasons || []).join('；') + '；AI：' + result.reason
-    })));
+    if (latest.scoreOverride !== true || latest.reviewStatus !== 'pending_review') {
+      syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, result, {
+        reviewStatus: '',
+        reviewUpdatedAt: Date.now(),
+        reason: (latest.filterReasons || []).join('；') + '；AI：' + result.reason
+      })));
+    }
   } catch (error) {
     const latest = findJob(jobId) || job;
-    const failed = MatchScoring.quickPendingResult(error.message || '快速判断失败');
-    syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, failed, {
-      reviewStatus: '',
-      reviewUpdatedAt: Date.now(),
-      reason: (latest.filterReasons || []).join('；') + '；AI：' + failed.reason
-    })));
+    if (latest.scoreOverride !== true || latest.reviewStatus !== 'pending_review') {
+      const failed = MatchScoring.quickPendingResult(error.message || '快速判断失败');
+      syncJob(ReviewWorkflow.normalizeJob(Object.assign({}, latest, failed, {
+        reviewStatus: '',
+        reviewUpdatedAt: Date.now(),
+        reason: (latest.filterReasons || []).join('；') + '；AI：' + failed.reason
+      })));
+    }
   }
   try {
     await persistReviewState();
@@ -992,6 +991,35 @@ async function batchApprove(jobIds) {
   await persistReviewState();
   broadcastScreened();
   return { screened: state.screened, approvedIds: result.approvedIds };
+}
+
+async function batchConfirmCandidates(jobIds) {
+  await hydrateReviewState();
+  const cfg = await getCfg();
+  const requested = new Set(Array.isArray(jobIds) ? jobIds.map(String) : []);
+  const prepared = state.screened.map(job => {
+    if (!requested.has(String(job.id)) || !ReviewWorkflow.isManualConfirmable(job)) return job;
+    if (job.filterStatus !== 'pending') return job;
+    try {
+      return JobFilters.confirmPending(job, cfg.jobFilterConfig);
+    } catch (error) {
+      return job;
+    }
+  });
+  const result = ReviewWorkflow.confirmManyCandidates(prepared, jobIds, Date.now());
+  if (!result.confirmedIds.length) throw new Error('没有可一键确认的待补充岗位');
+  state.screened = result.jobs;
+  state.screened.forEach(job => {
+    const index = state.jobs.findIndex(item => item.id === job.id);
+    if (index >= 0) state.jobs[index] = job;
+  });
+  await persistReviewState();
+  broadcastScreened();
+  return {
+    screened: state.screened,
+    confirmedIds: result.confirmedIds,
+    skippedIds: result.skippedIds
+  };
 }
 
 async function overrideScoreDecision(jobId) {
@@ -1239,9 +1267,30 @@ async function confirmPreview(jobId, aiOpening) {
   const job = findScreened(jobId);
   if (!preview || !job) throw new Error('找不到岗位预演');
   if (job.reviewStatus !== 'approved') throw new Error('只有已批准岗位可以确认预演');
+  if (regeneratingPreviewTasks.has(jobId)) throw new Error('该岗位预演正在重新生成');
   state.previews[jobId] = ReviewWorkflow.confirmPreview(preview, aiOpening, Date.now());
   await persistReviewState();
   return { preview: state.previews[jobId], previews: state.previews };
+}
+
+async function batchConfirmPreviews(jobIds, openingsByJobId) {
+  await hydrateReviewState();
+  const result = ReviewWorkflow.confirmManyPreviews(
+    state.previews,
+    state.screened,
+    jobIds,
+    openingsByJobId,
+    Date.now(),
+    Array.from(regeneratingPreviewTasks)
+  );
+  if (!result.confirmedIds.length) throw new Error('没有可一键确认的岗位预演');
+  state.previews = result.previews;
+  await persistReviewState();
+  return {
+    previews: state.previews,
+    confirmedIds: result.confirmedIds,
+    skipped: result.skipped
+  };
 }
 
 async function updatePreviewDraft(jobId, aiOpening, editedAt) {
@@ -1271,6 +1320,7 @@ async function regeneratePreviewOpening(jobId) {
   const job = findScreened(jobId);
   if (!preview || !job) throw new Error('找不到岗位预演');
   if (job.reviewStatus !== 'approved') throw new Error('只有已批准岗位可以重新生成开场');
+  if (regeneratingPreviewTasks.has(jobId)) throw new Error('该岗位预演正在重新生成');
   if ((preview.enabledSteps || []).indexOf('aiOpening') < 0) {
     throw new Error('当前招呼方案未启用 AI 开场');
   }
@@ -1280,17 +1330,22 @@ async function regeneratePreviewOpening(jobId) {
   const jd = String(preview.jd || job.jd || '').trim();
   if (!jd) throw new Error('预演缺少完整 JD，无法重新生成');
 
-  const aiOpening = await generateAiOpeningWithRetry(cfg, plan, job, jd);
-  const regenerated = ReviewWorkflow.regeneratePreview(
-    preview,
-    previewInputs(job, cfg, plan, jd),
-    aiOpening,
-    Date.now()
-  );
-  state.previews[jobId] = regenerated;
-  await persistReviewState();
-  log('已重新生成 ' + job.name + ' 的 AI 开场，请再次确认', 'success');
-  return { preview: regenerated, previews: state.previews };
+  regeneratingPreviewTasks.add(jobId);
+  try {
+    const aiOpening = await generateAiOpeningWithRetry(cfg, plan, job, jd);
+    const regenerated = ReviewWorkflow.regeneratePreview(
+      preview,
+      previewInputs(job, cfg, plan, jd),
+      aiOpening,
+      Date.now()
+    );
+    state.previews[jobId] = regenerated;
+    await persistReviewState();
+    log('已重新生成 ' + job.name + ' 的 AI 开场，请再次确认', 'success');
+    return { preview: regenerated, previews: state.previews };
+  } finally {
+    regeneratingPreviewTasks.delete(jobId);
+  }
 }
 
 // ── 正式三段式投递 ──
@@ -1571,6 +1626,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(error => sendResponse({ ok: false, error: error.message || '批量批准失败' }));
     return true;
   }
+  if (message.type === 'BATCH_CONFIRM_CANDIDATES') {
+    batchConfirmCandidates(message.jobIds)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '批量人工确认失败' }));
+    return true;
+  }
   if (message.type === 'SET_REVIEW_DECISION') {
     setReviewDecision(message.jobId, message.decision)
       .then(result => sendResponse({ ok: true, result: result }))
@@ -1599,6 +1660,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     confirmPreview(message.jobId, message.aiOpening)
       .then(result => sendResponse({ ok: true, result: result }))
       .catch(error => sendResponse({ ok: false, error: error.message || '预演确认失败' }));
+    return true;
+  }
+  if (message.type === 'BATCH_CONFIRM_PREVIEWS') {
+    batchConfirmPreviews(message.jobIds, message.openingsByJobId)
+      .then(result => sendResponse({ ok: true, result: result }))
+      .catch(error => sendResponse({ ok: false, error: error.message || '批量预演确认失败' }));
     return true;
   }
   if (message.type === 'UPDATE_PREVIEW_DRAFT') {
