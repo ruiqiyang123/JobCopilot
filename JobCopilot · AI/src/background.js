@@ -2,7 +2,8 @@
 importScripts(
   '/src/selectors.js', '/src/job-filters.js', '/src/job-detail.js',
   '/src/greeting-plans.js', '/src/review-workflow.js', '/src/workflow-safety.js',
-  '/src/job-tracker.js', '/src/chat-navigation.js', '/src/storage-utils.js', '/src/llm-client.js'
+  '/src/job-tracker.js', '/src/chat-navigation.js', '/src/contact-retry.js',
+  '/src/storage-utils.js', '/src/llm-client.js'
 );
 
 const CFG_KEYS = [
@@ -346,7 +347,7 @@ async function establishChatPage(opened, job, temporaryTabIds) {
     expectedJobId: job.id,
     existingTabIds: before.map(tab => tab.id),
     timeoutMs: 30000,
-    missingJobIdGraceMs: 5000,
+    missingJobIdGraceMs: 12000,
     pollIntervalMs: 250,
     isCancelled: () => state.aborted
   });
@@ -823,6 +824,27 @@ async function regeneratePreviewOpening(jobId) {
 }
 
 // ── 正式三段式投递 ──
+async function openVerifiedChatPage(job, cfg, plan, temporaryTabIds) {
+  state.lastBatch.currentStep = 'detail';
+  const opened = await openJobForDelivery(job, cfg);
+  if (opened.temporary) temporaryTabIds.add(opened.tab.id);
+
+  const current = JobDetail.mergeDetail(job, Object.assign({}, opened.detail.currentJob, {
+    jd: opened.detail.jd || ''
+  }));
+  const verified = WorkflowSafety.verifyEligibility(job, current, cfg.jobFilterConfig, state.processed);
+  if (!verified.ok) throw new Error('发送前校验失败：' + verified.reasons.join('；'));
+  verified.job.reviewStatus = job.reviewStatus;
+  const previewGate = ReviewWorkflow.isPreviewReady(
+    state.previews[job.id],
+    previewInputs(verified.job, cfg, plan, opened.detail.jd || '')
+  );
+  if (!previewGate.ok) throw new Error(previewGate.reason);
+
+  state.lastBatch.currentStep = 'contact';
+  return establishChatPage(opened, job, temporaryTabIds);
+}
+
 async function runDeliver(jobIds) {
   state.aborted = false;
   state.paused = false;
@@ -854,31 +876,30 @@ async function runDeliver(jobIds) {
     }
     await waitIfPaused();
     const job = findScreened(ids[index]);
-    let opened = null;
     const temporaryTabIds = new Set();
     try {
       if (!job) throw new Error('找不到岗位数据');
       state.lastBatch.currentJobId = job.id;
-      state.lastBatch.currentStep = 'detail';
       state.lastBatch.executedIds.push(job.id);
       log('[' + (index + 1) + '/' + ids.length + '] 正式投递 ' + job.name + ' - ' + (job.company || ''));
 
-      opened = await openJobForDelivery(job, cfg);
-      if (opened.temporary) temporaryTabIds.add(opened.tab.id);
-      const current = JobDetail.mergeDetail(job, Object.assign({}, opened.detail.currentJob, {
-        jd: opened.detail.jd || ''
-      }));
-      const verified = WorkflowSafety.verifyEligibility(job, current, cfg.jobFilterConfig, state.processed);
-      if (!verified.ok) throw new Error('发送前校验失败：' + verified.reasons.join('；'));
-      verified.job.reviewStatus = job.reviewStatus;
-      const previewGate = ReviewWorkflow.isPreviewReady(
-        state.previews[job.id],
-        previewInputs(verified.job, cfg, plan, opened.detail.jd || '')
-      );
-      if (!previewGate.ok) throw new Error(previewGate.reason);
-
-      state.lastBatch.currentStep = 'contact';
-      const chatPage = await establishChatPage(opened, job, temporaryTabIds);
+      let chatPage = null;
+      for (let attempt = 0; attempt < ContactRetry.MAX_ATTEMPTS; attempt++) {
+        try {
+          chatPage = await openVerifiedChatPage(job, cfg, plan, temporaryTabIds);
+          break;
+        } catch (error) {
+          const retry = ContactRetry.shouldRetry(error, {
+            attempt: attempt,
+            sendStarted: false,
+            aborted: state.aborted,
+            paused: state.paused
+          });
+          if (!retry) throw error;
+          log('聊天身份加载失败，正在自动重试 1/1', 'warn');
+        }
+      }
+      if (!chatPage) throw new Error('未找到对应岗位聊天页');
 
       const injected = await ensureInjected(chatPage.tab.id, 'src/content-chat.js');
       if (!injected) throw new Error('聊天页脚本注入失败');
