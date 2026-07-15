@@ -73,3 +73,27 @@ test('详情字段补全卡片缺失信息但不覆盖稳定身份', () => {
   assert.equal(merged.companySize, 'hundred_to_499');
   assert.match(merged.jd, /AI Agent/);
 });
+
+test('岗位详情合并新增硬筛选事实且不丢失卡片信息', () => {
+  const merged = JobDetail.mergeDetail({
+    detailUrl: 'https://www.zhipin.com/job_detail/job-advanced.html',
+    name: 'AI 产品经理',
+    company: '示例科技',
+    salary: '15-25K·14薪',
+    rawFacts: ['深圳·南山区', '1-3年', '100-499人', '全职']
+  }, {
+    jd: '本科，职位发布于 2 天前，负责 RAG 与 Agent 产品。',
+    rawFacts: ['本科', '2天前发布']
+  });
+
+  assert.equal(merged.employmentType, 'full_time');
+  assert.equal(merged.education, 'bachelor');
+  assert.equal(merged.educationRequirement, 'bachelor');
+  assert.deepEqual(merged.salaryRange, { minK: 15, maxK: 25, months: 14 });
+  assert.equal(merged.salaryMinK, 15);
+  assert.equal(merged.salaryMaxK, 25);
+  assert.equal(merged.salaryMonths, 14);
+  assert.equal(merged.city, '深圳');
+  assert.equal(merged.district, '南山区');
+  assert.equal(merged.publishedDaysAgo, 2);
+});

@@ -14,6 +14,13 @@ const JOB = {
   reviewStatus: 'approved'
 };
 
+const FILTER_CONFIG = {
+  experienceEnabled: true,
+  experienceValues: ['under_one', 'one_to_three'],
+  companySizeEnabled: true,
+  companySizeValues: ['hundred_to_499', 'five_hundred_to_999', 'thousand_to_9999', 'ten_thousand_plus']
+};
+
 test('岗位 ID、名称和公司一致时身份校验通过', () => {
   const result = WorkflowSafety.verifyIdentity(JOB, Object.assign({}, JOB));
   assert.equal(result.ok, true);
@@ -28,27 +35,27 @@ test('岗位 ID、名称、公司不一致或当前字段缺失时阻止', () =>
 });
 
 test('发送前重新应用筛选条件，并阻止已投岗位', () => {
-  const eligible = WorkflowSafety.verifyEligibility(JOB, Object.assign({}, JOB), undefined, {});
+  const eligible = WorkflowSafety.verifyEligibility(JOB, Object.assign({}, JOB), FILTER_CONFIG, {});
   assert.equal(eligible.ok, true);
   assert.equal(eligible.job.filterStatus, 'pass');
 
   const changed = WorkflowSafety.verifyEligibility(
     Object.assign({}, JOB, { manualOverride: true }),
     Object.assign({}, JOB, { companySize: 'twenty_to_99' }),
-    undefined,
+    FILTER_CONFIG,
     {}
   );
   assert.equal(changed.ok, false);
   assert.match(changed.reasons.join('；'), /公司规模/);
 
-  const processed = WorkflowSafety.verifyEligibility(JOB, Object.assign({}, JOB), undefined, { 'job-1': 1 });
+  const processed = WorkflowSafety.verifyEligibility(JOB, Object.assign({}, JOB), FILTER_CONFIG, { 'job-1': 1 });
   assert.equal(processed.ok, false);
   assert.match(processed.reasons.join('；'), /已经成功投递/);
 });
 
 test('人工确认只覆盖仍然缺失的信息', () => {
   const unknown = Object.assign({}, JOB, { experience: '', manualOverride: true });
-  const result = WorkflowSafety.verifyEligibility(unknown, Object.assign({}, unknown), undefined, {});
+  const result = WorkflowSafety.verifyEligibility(unknown, Object.assign({}, unknown), FILTER_CONFIG, {});
   assert.equal(result.ok, true);
   assert.equal(result.job.manualOverride, true);
 });

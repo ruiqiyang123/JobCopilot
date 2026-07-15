@@ -85,8 +85,20 @@ test('岗位硬筛选在 AI 筛选前执行，并提供可配置 UI 和人工确
   assert.match(sidepanelHtml, /id="experienceFilterOptions"/);
   assert.match(sidepanelHtml, /id="companySizeFilterEnabled"/);
   assert.match(sidepanelHtml, /id="companySizeFilterOptions"/);
+  assert.match(sidepanelHtml, /id="employmentTypeFilterEnabled"/);
+  assert.match(sidepanelHtml, /id="educationFilterEnabled"/);
+  assert.match(sidepanelHtml, /id="salaryFilterEnabled"/);
+  assert.match(sidepanelHtml, /id="districtFilterEnabled"/);
+  assert.match(sidepanelHtml, /id="publishedTimeFilterEnabled"/);
+  assert.match(sidepanelHtml, /id="mustWordsFilterEnabled"/);
+  assert.match(sidepanelHtml, /id="excludeWordsFilterEnabled"/);
+  assert.match(sidepanelHtml, /id="companyBlacklistEnabled"/);
   assert.ok(sidepanelHtml.indexOf('job-filters.js') < sidepanelHtml.indexOf('sidepanel.js'));
   assert.match(sidepanelJs, /jobFilterConfig/);
+  assert.match(sidepanelJs, /employmentTypeValues/);
+  assert.match(sidepanelJs, /educationValues/);
+  assert.match(sidepanelJs, /salaryMinK/);
+  assert.match(sidepanelJs, /publishedWithinDays/);
   assert.match(sidepanelJs, /CONFIRM_FILTER_PENDING/);
   assert.deepEqual(
     manifest.content_scripts[0].js.slice(0, 2),

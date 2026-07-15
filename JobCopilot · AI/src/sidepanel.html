@@ -64,6 +64,52 @@
         <label class="toggle-label"><input type="checkbox" id="companySizeFilterEnabled" checked> 启用公司规模筛选</label>
         <div class="filter-options" id="companySizeFilterOptions"></div>
       </div>
+      <details class="filter-group advanced-filters">
+        <summary>更多硬筛选条件</summary>
+        <p class="filter-help">条件明确不符合会在调用 AI 前排除；启用但页面信息缺失时进入“待补充”。</p>
+        <div class="filter-subgroup">
+          <label class="toggle-label"><input type="checkbox" id="employmentTypeFilterEnabled"> 启用岗位类型筛选</label>
+          <div class="filter-options" id="employmentTypeFilterOptions"></div>
+        </div>
+        <div class="filter-subgroup">
+          <label class="toggle-label"><input type="checkbox" id="educationFilterEnabled"> 启用学历要求筛选</label>
+          <div class="filter-options" id="educationFilterOptions"></div>
+        </div>
+        <div class="filter-subgroup">
+          <label class="toggle-label"><input type="checkbox" id="salaryFilterEnabled"> 启用月薪范围筛选</label>
+          <div class="grid-two filter-fields" id="salaryFilterFields">
+            <div><label>最低月薪（K）</label><input type="number" id="salaryMinK" min="0" step="1" value="15"></div>
+            <div><label>最高月薪（K）</label><input type="number" id="salaryMaxK" min="0" step="1" value="30"></div>
+          </div>
+        </div>
+        <div class="filter-subgroup">
+          <label class="toggle-label"><input type="checkbox" id="districtFilterEnabled"> 启用行政区筛选</label>
+          <div id="districtFilterFields"><label>行政区（逗号、顿号或换行分隔）</label>
+            <input type="text" id="districtValues" placeholder="南山区、福田区"></div>
+        </div>
+        <div class="filter-subgroup">
+          <label class="toggle-label"><input type="checkbox" id="publishedTimeFilterEnabled"> 启用发布时间筛选</label>
+          <div id="publishedTimeFilterFields"><label>发布时间</label><select id="publishedWithinDays">
+            <option value="0">当天</option><option value="3">3 天内</option>
+            <option value="7" selected>7 天内</option><option value="30">30 天内</option>
+          </select></div>
+        </div>
+        <div class="filter-subgroup">
+          <label class="toggle-label"><input type="checkbox" id="mustWordsFilterEnabled"> 启用必须包含词</label>
+          <div id="mustWordsFilterFields"><label>关键词</label><textarea id="mustWords" rows="2" placeholder="Agent、RAG"></textarea>
+            <label>命中方式</label><select id="mustWordsMode"><option value="any">任意一个</option><option value="all">全部命中</option></select></div>
+        </div>
+        <div class="filter-subgroup">
+          <label class="toggle-label"><input type="checkbox" id="excludeWordsFilterEnabled"> 启用排除关键词</label>
+          <div id="excludeWordsFilterFields"><label>关键词</label><textarea id="excludeWords" rows="2" placeholder="销售、外包"></textarea>
+            <label>匹配范围</label><select id="excludeWordsScope"><option value="title">仅岗位标题</option><option value="title_jd">岗位标题与完整 JD</option></select></div>
+        </div>
+        <div class="filter-subgroup">
+          <label class="toggle-label"><input type="checkbox" id="companyBlacklistEnabled"> 启用公司黑名单</label>
+          <div id="companyBlacklistFields"><label>公司名称（精确匹配，每行一家）</label>
+            <textarea id="companyBlacklist" rows="3" placeholder="示例科技有限公司"></textarea></div>
+        </div>
+      </details>
       <button class="btn-primary" id="saveCfg">保存基础配置</button>
       <span id="saved" class="ok-msg hidden">✓ 已保存</span>
     </div>

@@ -48,10 +48,12 @@
     const detailUrl = canonicalizeDetailUrl(source.detailUrl || source.link || '', source.pageUrl);
     const stableId = extractJobId(detailUrl);
     const rawFacts = uniqueTexts([].concat(source.rawFacts || [], source.tags || []));
-    const facts = JobFilters ? JobFilters.extractFacts(rawFacts) : { experience: '', companySize: '' };
     const name = cleanText(source.name) || '未知岗位';
     const company = cleanText(source.company);
     const salary = cleanText(source.salary);
+    const facts = JobFilters
+      ? JobFilters.extractFacts(rawFacts.concat([name, salary]))
+      : { experience: '', companySize: '' };
     const fallbackId = cleanText(source.id) || [name, company, salary].join('|');
 
     return Object.assign({}, source, {
@@ -65,6 +67,20 @@
       rawFacts: rawFacts,
       experience: source.experience || facts.experience || '',
       companySize: source.companySize || facts.companySize || '',
+      employmentType: source.employmentType || facts.employmentType || '',
+      education: source.education || facts.education || '',
+      educationRequirement: source.educationRequirement || source.education || facts.education || '',
+      salaryRange: source.salaryRange || facts.salaryRange || null,
+      salaryMinK: source.salaryMinK || (source.salaryRange && source.salaryRange.minK)
+        || (facts.salaryRange && facts.salaryRange.minK) || null,
+      salaryMaxK: source.salaryMaxK || (source.salaryRange && source.salaryRange.maxK)
+        || (facts.salaryRange && facts.salaryRange.maxK) || null,
+      salaryMonths: source.salaryMonths || (source.salaryRange && source.salaryRange.months)
+        || (facts.salaryRange && facts.salaryRange.months) || null,
+      city: source.city || facts.city || '',
+      district: source.district || facts.district || '',
+      publishedDaysAgo: source.publishedDaysAgo === 0 || source.publishedDaysAgo
+        ? Number(source.publishedDaysAgo) : facts.publishedDaysAgo,
       collectedAt: Number(source.collectedAt) || Date.now()
     });
   }
@@ -92,7 +108,9 @@
     const source = normalizeCollectedJob(sourceJob || {});
     const current = detail || {};
     const rawFacts = uniqueTexts([].concat(source.rawFacts || [], current.rawFacts || [], current.tags || []));
-    const facts = JobFilters ? JobFilters.extractFacts(rawFacts.concat([current.jd || ''])) : { experience: '', companySize: '' };
+    const facts = JobFilters ? JobFilters.extractFacts(rawFacts.concat([
+      current.name || source.name, current.salary || source.salary, current.jd || ''
+    ])) : { experience: '', companySize: '' };
     return Object.assign({}, source, {
       id: source.id,
       detailUrl: source.detailUrl || canonicalizeDetailUrl(current.detailUrl || current.link),
@@ -104,6 +122,23 @@
       rawFacts: rawFacts,
       experience: current.experience || facts.experience || source.experience,
       companySize: current.companySize || facts.companySize || source.companySize,
+      employmentType: current.employmentType || facts.employmentType || source.employmentType || '',
+      education: current.education || facts.education || source.education || '',
+      educationRequirement: current.educationRequirement || current.education || facts.education
+        || source.educationRequirement || source.education || '',
+      salaryRange: current.salaryRange || facts.salaryRange || source.salaryRange || null,
+      salaryMinK: current.salaryMinK || (current.salaryRange && current.salaryRange.minK)
+        || (facts.salaryRange && facts.salaryRange.minK) || source.salaryMinK || null,
+      salaryMaxK: current.salaryMaxK || (current.salaryRange && current.salaryRange.maxK)
+        || (facts.salaryRange && facts.salaryRange.maxK) || source.salaryMaxK || null,
+      salaryMonths: current.salaryMonths || (current.salaryRange && current.salaryRange.months)
+        || (facts.salaryRange && facts.salaryRange.months) || source.salaryMonths || null,
+      city: current.city || facts.city || source.city || '',
+      district: current.district || facts.district || source.district || '',
+      publishedDaysAgo: current.publishedDaysAgo === 0 || current.publishedDaysAgo
+        ? Number(current.publishedDaysAgo)
+        : (facts.publishedDaysAgo === 0 || facts.publishedDaysAgo
+          ? Number(facts.publishedDaysAgo) : source.publishedDaysAgo),
       jd: cleanText(current.jd) || cleanText(source.jd),
       available: current.available !== false,
       detailReadAt: Number(current.detailReadAt) || Date.now()

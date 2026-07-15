@@ -89,11 +89,39 @@ function setFilterValues(kind, values) {
 }
 
 function syncFilterEnabled(kind) {
-  const enabledId = kind === 'experience' ? 'experienceFilterEnabled' : 'companySizeFilterEnabled';
-  const optionsId = kind === 'experience' ? 'experienceFilterOptions' : 'companySizeFilterOptions';
+  const groups = {
+    experience: ['experienceFilterEnabled', 'experienceFilterOptions'],
+    companySize: ['companySizeFilterEnabled', 'companySizeFilterOptions'],
+    employmentType: ['employmentTypeFilterEnabled', 'employmentTypeFilterOptions'],
+    education: ['educationFilterEnabled', 'educationFilterOptions']
+  };
+  const group = groups[kind];
+  if (!group) return;
+  const enabledId = group[0];
+  const optionsId = group[1];
   const enabled = $(enabledId).checked;
   $(optionsId).classList.toggle('disabled', !enabled);
   document.querySelectorAll('[data-filter-kind="' + kind + '"]').forEach(input => { input.disabled = !enabled; });
+}
+
+function syncFieldFilter(enabledId, fieldsId) {
+  const enabled = $(enabledId).checked;
+  const fields = $(fieldsId);
+  fields.classList.toggle('disabled', !enabled);
+  fields.querySelectorAll('input, select, textarea').forEach(input => { input.disabled = !enabled; });
+}
+
+function syncAdvancedFilters() {
+  syncFilterEnabled('employmentType');
+  syncFilterEnabled('education');
+  [
+    ['salaryFilterEnabled', 'salaryFilterFields'],
+    ['districtFilterEnabled', 'districtFilterFields'],
+    ['publishedTimeFilterEnabled', 'publishedTimeFilterFields'],
+    ['mustWordsFilterEnabled', 'mustWordsFilterFields'],
+    ['excludeWordsFilterEnabled', 'excludeWordsFilterFields'],
+    ['companyBlacklistEnabled', 'companyBlacklistFields']
+  ].forEach(pair => syncFieldFilter(pair[0], pair[1]));
 }
 
 function applyJobFilterConfig(config) {
@@ -102,10 +130,30 @@ function applyJobFilterConfig(config) {
   catch (error) { normalized = JobFilters.getDefaultConfig(); }
   $('experienceFilterEnabled').checked = normalized.experienceEnabled;
   $('companySizeFilterEnabled').checked = normalized.companySizeEnabled;
+  $('employmentTypeFilterEnabled').checked = normalized.employmentTypeEnabled;
+  $('educationFilterEnabled').checked = normalized.educationEnabled;
+  $('salaryFilterEnabled').checked = normalized.salaryEnabled;
+  $('districtFilterEnabled').checked = normalized.districtEnabled;
+  $('publishedTimeFilterEnabled').checked = normalized.publishedTimeEnabled;
+  $('mustWordsFilterEnabled').checked = normalized.mustWordsEnabled;
+  $('excludeWordsFilterEnabled').checked = normalized.excludeWordsEnabled;
+  $('companyBlacklistEnabled').checked = normalized.companyBlacklistEnabled;
   setFilterValues('experience', normalized.experienceValues);
   setFilterValues('companySize', normalized.companySizeValues);
+  setFilterValues('employmentType', normalized.employmentTypeValues);
+  setFilterValues('education', normalized.educationValues);
+  $('salaryMinK').value = normalized.salaryMinK;
+  $('salaryMaxK').value = normalized.salaryMaxK;
+  $('districtValues').value = normalized.districtValues.join('、');
+  $('publishedWithinDays').value = String(normalized.publishedWithinDays);
+  $('mustWords').value = normalized.mustWords.join('、');
+  $('mustWordsMode').value = normalized.mustWordsMode;
+  $('excludeWords').value = normalized.excludeWords.join('、');
+  $('excludeWordsScope').value = normalized.excludeWordsScope;
+  $('companyBlacklist').value = normalized.companyBlacklist.join('\n');
   syncFilterEnabled('experience');
   syncFilterEnabled('companySize');
+  syncAdvancedFilters();
 }
 
 function checkedFilterValues(kind) {
@@ -118,7 +166,27 @@ function readJobFilterForm() {
     experienceEnabled: $('experienceFilterEnabled').checked,
     experienceValues: checkedFilterValues('experience'),
     companySizeEnabled: $('companySizeFilterEnabled').checked,
-    companySizeValues: checkedFilterValues('companySize')
+    companySizeValues: checkedFilterValues('companySize'),
+    city: $('city').value.trim(),
+    employmentTypeEnabled: $('employmentTypeFilterEnabled').checked,
+    employmentTypeValues: checkedFilterValues('employmentType'),
+    educationEnabled: $('educationFilterEnabled').checked,
+    educationValues: checkedFilterValues('education'),
+    salaryEnabled: $('salaryFilterEnabled').checked,
+    salaryMinK: $('salaryMinK').value,
+    salaryMaxK: $('salaryMaxK').value,
+    districtEnabled: $('districtFilterEnabled').checked,
+    districtValues: $('districtValues').value,
+    publishedTimeEnabled: $('publishedTimeFilterEnabled').checked,
+    publishedWithinDays: $('publishedWithinDays').value,
+    mustWordsEnabled: $('mustWordsFilterEnabled').checked,
+    mustWords: $('mustWords').value,
+    mustWordsMode: $('mustWordsMode').value,
+    excludeWordsEnabled: $('excludeWordsFilterEnabled').checked,
+    excludeWords: $('excludeWords').value,
+    excludeWordsScope: $('excludeWordsScope').value,
+    companyBlacklistEnabled: $('companyBlacklistEnabled').checked,
+    companyBlacklist: $('companyBlacklist').value
   });
 }
 
@@ -146,6 +214,8 @@ function renderKeywordSearchSummary() {
 
 renderFilterOptions('experienceFilterOptions', 'experience', JobFilters.EXPERIENCE_OPTIONS);
 renderFilterOptions('companySizeFilterOptions', 'companySize', JobFilters.COMPANY_SIZE_OPTIONS);
+renderFilterOptions('employmentTypeFilterOptions', 'employmentType', JobFilters.EMPLOYMENT_TYPE_OPTIONS);
+renderFilterOptions('educationFilterOptions', 'education', JobFilters.EDUCATION_OPTIONS);
 
 function readLLMForm() {
   return {
@@ -196,6 +266,7 @@ function llmStorageFrom(config) {
 }
 
 async function persistCurrentConfig() {
+  if (!$('city').value.trim()) throw new Error('请先填写目标城市');
   const normalized = LLMClient.validateConfig(readLLMForm());
   const granted = await ensureCustomHostPermission(normalized);
   if (!granted) throw new Error('未授权访问该模型接口域名');
@@ -255,6 +326,16 @@ $('llmProvider').addEventListener('change', () => {
 });
 $('experienceFilterEnabled').addEventListener('change', () => syncFilterEnabled('experience'));
 $('companySizeFilterEnabled').addEventListener('change', () => syncFilterEnabled('companySize'));
+$('employmentTypeFilterEnabled').addEventListener('change', () => syncFilterEnabled('employmentType'));
+$('educationFilterEnabled').addEventListener('change', () => syncFilterEnabled('education'));
+[
+  ['salaryFilterEnabled', 'salaryFilterFields'],
+  ['districtFilterEnabled', 'districtFilterFields'],
+  ['publishedTimeFilterEnabled', 'publishedTimeFilterFields'],
+  ['mustWordsFilterEnabled', 'mustWordsFilterFields'],
+  ['excludeWordsFilterEnabled', 'excludeWordsFilterFields'],
+  ['companyBlacklistEnabled', 'companyBlacklistFields']
+].forEach(pair => $(pair[0]).addEventListener('change', () => syncFieldFilter(pair[0], pair[1])));
 $('keyword').addEventListener('input', renderKeywordSearchSummary);
 $('searchMatchMode').addEventListener('change', renderKeywordSearchSummary);
 $('keywordExpansionEnabled').addEventListener('change', renderKeywordSearchSummary);
@@ -448,11 +529,17 @@ function reviewCounts() {
 }
 
 function jobFactsText(job) {
-  return [
+  const facts = [
     job.company || '公司未知', job.salary || '薪资未知',
     '经验：' + JobFilters.labelFor('experience', job.experience),
     '规模：' + JobFilters.labelFor('companySize', job.companySize)
-  ].join(' · ');
+  ];
+  if (job.employmentType) facts.push('类型：' + JobFilters.labelFor('employmentType', job.employmentType));
+  if (job.education) facts.push('学历：' + JobFilters.labelFor('education', job.education));
+  if (job.district) facts.push('区域：' + job.district);
+  if (job.publishedDaysAgo === 0) facts.push('当天发布');
+  else if (job.publishedDaysAgo) facts.push(job.publishedDaysAgo + ' 天前发布');
+  return facts.join(' · ');
 }
 
 function reasonClass(job) {

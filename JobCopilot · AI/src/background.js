@@ -64,6 +64,10 @@ function jobInfo(job) {
     + '\n薪资：' + (job.salary || '')
     + '\n工作经验：' + JobFilters.labelFor('experience', job.experience)
     + '\n公司规模：' + JobFilters.labelFor('companySize', job.companySize)
+    + '\n岗位类型：' + JobFilters.labelFor('employmentType', job.employmentType)
+    + '\n学历要求：' + JobFilters.labelFor('education', job.education)
+    + '\n工作地点：' + [job.city, job.district].filter(Boolean).join('·')
+    + '\n发布时间：' + (job.publishedDaysAgo === 0 ? '当天' : (job.publishedDaysAgo ? job.publishedDaysAgo + ' 天前' : '未知'))
     + '\n完整 JD：\n' + String(job.jd || '').slice(0, 8000);
 }
 
