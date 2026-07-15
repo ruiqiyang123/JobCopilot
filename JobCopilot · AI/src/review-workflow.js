@@ -91,8 +91,7 @@
       enabledSteps: GreetingPlans.enabledSteps(plan),
       aiOpening: String(body.aiOpening || '').trim(),
       fixedMessage: plan.fixedMessageEnabled ? String(body.fixedMessage || plan.fixedMessage || '').trim() : '',
-      resumeImage: plan.resumeImageEnabled ? String(body.resumeImage || plan.resumeImage || '') : '',
-      resumeImageFingerprint: GreetingPlans.hashText(plan.resumeImageEnabled ? String(body.resumeImage || plan.resumeImage || '') : ''),
+      resumeImageFingerprint: GreetingPlans.hashText(plan.resumeImageEnabled ? String(plan.resumeImage || '') : ''),
       jd: String(source.jd || job.jd || ''),
       inputFingerprint: inputFingerprint(source),
       inputFingerprintVersion: 2,
@@ -128,8 +127,7 @@
     if (!opening) throw new Error('AI 个性化开场生成失败');
     return createPreview(context, {
       aiOpening: opening,
-      fixedMessage: source.fixedMessage,
-      resumeImage: source.resumeImage
+      fixedMessage: source.fixedMessage
     }, at);
   }
 
@@ -148,15 +146,48 @@
     if (expected.jobIdentity !== current.jobIdentity) return { ok: false, reason: '岗位身份已变化' };
     if (expected.resume !== current.resume) return { ok: false, reason: '简历内容已变化' };
     if (expected.filters !== current.filters) return { ok: false, reason: '岗位筛选配置已变化' };
+    const plan = GreetingPlans.normalizePlan((inputs || {}).plan || {});
+    if ((source.enabledSteps || []).indexOf('resumeImage') >= 0) {
+      const currentImageFingerprint = GreetingPlans.hashText(String(plan.resumeImage || ''));
+      if (!source.resumeImageFingerprint || source.resumeImageFingerprint !== currentImageFingerprint) {
+        return { ok: false, reason: '简历图片已变化' };
+      }
+    }
     if (expected.plan !== current.plan) return { ok: false, reason: '招呼方案已变化' };
     if (source.inputFingerprint !== inputFingerprint(inputs)) return { ok: false, reason: '预演稳定配置已变化' };
     return { ok: true, reason: '' };
   }
 
+  function stripEmbeddedImage(preview) {
+    const next = Object.assign({}, preview || {});
+    const embedded = String(next.resumeImage || '');
+    if (!next.resumeImageFingerprint && embedded) {
+      next.resumeImageFingerprint = GreetingPlans.hashText(embedded);
+    }
+    delete next.resumeImage;
+    return next;
+  }
+
+  function stripEmbeddedImages(previews) {
+    const result = {};
+    Object.keys(previews || {}).forEach(jobId => {
+      result[jobId] = stripEmbeddedImage(previews[jobId]);
+    });
+    return result;
+  }
+
   function migratePreviews(previews) {
     const result = {};
     Object.keys(previews || {}).forEach(jobId => {
-      const preview = Object.assign({}, previews[jobId]);
+      const preview = stripEmbeddedImage(previews[jobId]);
+      const imageEnabled = (preview.enabledSteps || []).indexOf('resumeImage') >= 0;
+      if (imageEnabled && !preview.resumeImageFingerprint) {
+        result[jobId] = Object.assign({}, preview, {
+          status: 'expired',
+          error: '旧预演缺少简历图片指纹，需要重新生成并确认'
+        });
+        return;
+      }
       const currentVersion = preview.inputFingerprintVersion === 2 && preview.inputFingerprintParts;
       if (preview.status === 'confirmed' && preview.inputFingerprint && currentVersion) result[jobId] = preview;
       else if ((preview.status === 'draft' || preview.status === 'failed' || preview.status === 'expired')
@@ -183,6 +214,7 @@
     confirmPreview: confirmPreview,
     regeneratePreview: regeneratePreview,
     isPreviewReady: isPreviewReady,
+    stripEmbeddedImages: stripEmbeddedImages,
     migratePreviews: migratePreviews
   };
 });

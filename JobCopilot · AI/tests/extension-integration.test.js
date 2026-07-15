@@ -155,6 +155,7 @@ test('正式投递先观察匹配聊天页，再发送三段消息', () => {
   assert.match(establishBody, /ChatNavigation\.coordinate/);
   assert.match(establishBody, /ChatNavigation\.matchChatUrl/);
   assert.match(establishBody, /timeoutMs: 30000/);
+  assert.match(establishBody, /missingJobIdGraceMs: 5000/);
   assert.match(establishBody, /isCancelled: \(\) => state\.aborted/);
 
   const deliverStart = background.indexOf('async function runDeliver');
@@ -168,6 +169,50 @@ test('正式投递先观察匹配聊天页，再发送三段消息', () => {
   assert.match(deliverBody, /\}, 45000\);/);
   assert.match(deliverBody, /removeTabs\(Array\.from\(temporaryTabIds\)\)/);
   assert.match(navigation, /message \(\?:channel\|port\)/);
+  assert.match(navigation, /missingJobIdGraceMs/);
+  assert.match(navigation, /missingJobIdTabs/);
+});
+
+test('岗位页只关闭已识别的订阅回复弹窗并限制为一次重试', () => {
+  const background = read('src/background.js');
+  const contentSearch = read('src/content-search.js');
+  const interstitial = read('src/contact-interstitial.js');
+  const manifest = JSON.parse(read('manifest.json'));
+  const searchScripts = manifest.content_scripts[0].js;
+
+  assert.ok(searchScripts.includes('src/contact-interstitial.js'));
+  assert.ok(
+    searchScripts.indexOf('src/contact-interstitial.js') < searchScripts.indexOf('src/content-search.js'),
+    '订阅弹窗规则必须在岗位页脚本前加载'
+  );
+  assert.match(background, /'src\/contact-interstitial\.js', 'src\/content-search\.js'/);
+  assert.match(interstitial, /订阅回复消息/);
+  assert.match(interstitial, /使用微信扫码订阅/);
+  assert.match(contentSearch, /dismissSubscriptionDialog/);
+  assert.match(contentSearch, /BOSS 订阅回复弹窗重复出现，已停止批次/);
+  assert.match(contentSearch, /attempt < 2/);
+});
+
+test('预演只保存图片指纹并从已校验方案读取发送图片', () => {
+  const background = read('src/background.js');
+  const reviewWorkflow = read('src/review-workflow.js');
+  const sidepanelHtml = read('src/sidepanel.html');
+
+  const createStart = reviewWorkflow.indexOf('function createPreview');
+  const confirmStart = reviewWorkflow.indexOf('function confirmPreview', createStart);
+  const createBody = reviewWorkflow.slice(createStart, confirmStart);
+  assert.match(createBody, /resumeImageFingerprint/);
+  assert.doesNotMatch(createBody, /\n\s*resumeImage:/);
+  assert.match(reviewWorkflow, /delete next\.resumeImage/);
+  assert.match(reviewWorkflow, /stripEmbeddedImages/);
+
+  const deliverStart = background.indexOf('async function runDeliver');
+  const deliverEnd = background.indexOf('async function finishDeliverWithError', deliverStart);
+  const deliverBody = background.slice(deliverStart, deliverEnd);
+  assert.match(deliverBody, /image: plan\.resumeImageEnabled \? plan\.resumeImage : ''/);
+  assert.doesNotMatch(deliverBody, /preview\.resumeImage/);
+  assert.match(background, /StorageUtils\.toUserError/);
+  assert.ok(sidepanelHtml.indexOf('storage-utils.js') < sidepanelHtml.indexOf('sidepanel.js'));
 });
 
 test('预演按钮等待启动确认并在岗位卡片内显示实时进度与失败', () => {

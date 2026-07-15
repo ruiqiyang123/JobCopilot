@@ -38,6 +38,11 @@ function runtimeMessage(message) {
   });
 }
 
+async function localStorageSet(values) {
+  try { await chrome.storage.local.set(values); }
+  catch (error) { throw StorageUtils.toUserError(error); }
+}
+
 document.querySelectorAll('.card-h[data-toggle]').forEach(header => {
   header.addEventListener('click', () => {
     const body = $(header.dataset.toggle);
@@ -174,7 +179,7 @@ async function persistCurrentConfig() {
   const data = llmStorageFrom(normalized);
   data.jobFilterConfig = readJobFilterForm();
   BASIC_CFG_FIELDS.forEach(field => { data[field] = $(field).value.trim(); });
-  await chrome.storage.local.set(data);
+  await localStorageSet(data);
   const invalidated = await runtimeMessage({
     type: 'INVALIDATE_PREVIEWS', reason: '基础配置已变化，需要重新预演'
   });
@@ -196,7 +201,7 @@ function setLLMTestStatus(text, status) {
 async function loadConfig() {
   const stored = await chrome.storage.local.get(LOAD_FIELDS);
   const migrated = LLMClient.migrateStoredConfig(stored);
-  if (Object.keys(migrated).length) await chrome.storage.local.set(migrated);
+  if (Object.keys(migrated).length) await localStorageSet(migrated);
   const data = Object.assign({}, stored, migrated);
   BASIC_CFG_FIELDS.forEach(field => {
     if (data[field] !== undefined) $(field).value = data[field];
@@ -297,7 +302,7 @@ async function persistGreetingPlans() {
   if (!response.ok) throw new Error(response.error || '招呼方案保存失败');
   greetingPlansState = response.result.state || response.result;
   currentPreviews = response.result.previews || currentPreviews;
-  await chrome.storage.local.set({ greetingPlansState: greetingPlansState });
+  await localStorageSet({ greetingPlansState: greetingPlansState });
   renderPlanPicker();
   renderPreviews();
 }

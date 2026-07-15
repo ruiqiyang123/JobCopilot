@@ -138,6 +138,53 @@ test('原标签或其子标签进入错误岗位时立即阻止', async () => {
   });
 });
 
+test('相关聊天页暂缺 jobId 时等待补齐正确岗位身份', async () => {
+  const tabs = new FakeTabs([{ id: 1, url: DETAIL_URL, status: 'complete' }]);
+  const observer = observe(tabs, { missingJobIdGraceMs: 30 });
+  tabs.update(1, { url: 'https://www.zhipin.com/web/geek/chat?id=conversation', status: 'loading' });
+  setTimeout(() => tabs.update(1, { url: CHAT_URL, status: 'loading' }), 10);
+  const result = await observer.promise;
+  assert.equal(result.tab.id, 1);
+  assert.equal(result.jobId, JOB_ID);
+});
+
+test('相关聊天页在宽限期内补齐错误 jobId 时立即阻止', async () => {
+  const tabs = new FakeTabs([{ id: 1, url: DETAIL_URL, status: 'complete' }]);
+  const observer = observe(tabs, { missingJobIdGraceMs: 40 });
+  tabs.update(1, { url: 'https://www.zhipin.com/web/geek/chat?id=conversation', status: 'loading' });
+  setTimeout(() => tabs.update(1, {
+    url: 'https://www.zhipin.com/web/geek/chat?id=conversation&jobId=wrong', status: 'loading'
+  }), 10);
+  await assert.rejects(observer.promise, /岗位身份不一致/);
+});
+
+test('相关聊天页持续缺少 jobId 时在宽限期后阻止并清理监听', async () => {
+  const tabs = new FakeTabs([{ id: 1, url: DETAIL_URL, status: 'complete' }]);
+  const observer = observe(tabs, {
+    missingJobIdGraceMs: 20,
+    timeoutMs: 100,
+    pollIntervalMs: 5
+  });
+  tabs.update(1, { url: 'https://www.zhipin.com/web/geek/chat?id=conversation', status: 'loading' });
+  await assert.rejects(observer.promise, error => {
+    assert.equal(error.code, 'missing_job_id');
+    assert.match(error.message, /缺少岗位 ID/);
+    return true;
+  });
+  assert.equal(tabs.onUpdated.size, 0);
+  assert.equal(tabs.onCreated.size, 0);
+});
+
+test('来源不明的新聊天标签暂缺 jobId 时不影响当前岗位', async () => {
+  const tabs = new FakeTabs([{ id: 1, url: DETAIL_URL, status: 'complete' }]);
+  const observer = observe(tabs, { missingJobIdGraceMs: 15 });
+  tabs.add({ id: 5, url: 'https://www.zhipin.com/web/geek/chat?id=conversation', status: 'loading' });
+  await new Promise(resolve => setTimeout(resolve, 25));
+  tabs.update(1, { url: CHAT_URL, status: 'loading' });
+  const result = await observer.promise;
+  assert.equal(result.tab.id, 1);
+});
+
 test('超时和主动取消都会清理事件监听', async () => {
   const timeoutTabs = new FakeTabs([{ id: 1, url: DETAIL_URL, status: 'complete' }]);
   const timeoutObserver = observe(timeoutTabs, { timeoutMs: 25, pollIntervalMs: 5 });

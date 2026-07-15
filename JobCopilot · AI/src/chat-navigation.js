@@ -71,6 +71,11 @@
     existingTabIds.add(String(sourceTabId));
     const timeoutMs = Math.max(1, Number(config.timeoutMs) || 30000);
     const pollIntervalMs = Math.max(5, Number(config.pollIntervalMs) || 250);
+    const missingJobIdGraceMs = Math.max(
+      pollIntervalMs,
+      Number(config.missingJobIdGraceMs) || 5000
+    );
+    const missingJobIdTabs = new Map();
     let settled = false;
     let scanning = false;
     let timeoutId = null;
@@ -90,6 +95,7 @@
       pollId = null;
       tabsApi.onUpdated.removeListener(onUpdated);
       tabsApi.onCreated.removeListener(onCreated);
+      missingJobIdTabs.clear();
     }
 
     function succeed(result) {
@@ -116,8 +122,12 @@
 
     function inspect(tab) {
       if (settled || !tab) return;
+      const tabKey = String(tab.id);
       const parsed = parseChatUrl(tab.url || '');
-      if (!parsed.isChat) return;
+      if (!parsed.isChat) {
+        missingJobIdTabs.delete(tabKey);
+        return;
+      }
       const relation = relationFor(tab);
       if (!relation) return;
       const directlyRelated = relation === 'source' || relation === 'child';
@@ -128,10 +138,16 @@
       };
       if (!parsed.jobId) {
         if (directlyRelated) {
-          fail('missing_job_id', '聊天页缺少岗位 ID，已停止发送', failureDetails);
+          const pending = missingJobIdTabs.get(tabKey);
+          if (!pending) {
+            missingJobIdTabs.set(tabKey, { startedAt: Date.now(), details: failureDetails });
+          } else if (Date.now() - pending.startedAt >= missingJobIdGraceMs) {
+            fail('missing_job_id', '聊天页缺少岗位 ID，已停止发送', pending.details);
+          }
         }
         return;
       }
+      missingJobIdTabs.delete(tabKey);
       if (parsed.jobId !== expectedJobId) {
         if (directlyRelated) {
           fail('job_mismatch', '聊天页岗位身份不一致，已停止发送', failureDetails);

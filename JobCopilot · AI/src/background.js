@@ -2,7 +2,7 @@
 importScripts(
   '/src/selectors.js', '/src/job-filters.js', '/src/job-detail.js',
   '/src/greeting-plans.js', '/src/review-workflow.js', '/src/workflow-safety.js',
-  '/src/job-tracker.js', '/src/chat-navigation.js', '/src/llm-client.js'
+  '/src/job-tracker.js', '/src/chat-navigation.js', '/src/storage-utils.js', '/src/llm-client.js'
 );
 
 const CFG_KEYS = [
@@ -34,10 +34,15 @@ function resumeFull(cfg) { return String(cfg.resumeText || '').trim(); }
 function findJob(id) { return state.jobs.find(job => job.id === id) || null; }
 function findScreened(id) { return state.screened.find(job => job.id === id) || null; }
 
+async function storageSet(values) {
+  try { await chrome.storage.local.set(values); }
+  catch (error) { throw StorageUtils.toUserError(error); }
+}
+
 async function getCfg() {
   const stored = await chrome.storage.local.get(CFG_KEYS);
   const migrated = LLMClient.migrateStoredConfig(stored);
-  if (Object.keys(migrated).length) await chrome.storage.local.set(migrated);
+  if (Object.keys(migrated).length) await storageSet(migrated);
   const config = Object.assign({}, stored, migrated);
   config.greetingPlansState = GreetingPlans.normalizeState(config.greetingPlansState, {
     resumeImage: config.resumeImage || ''
@@ -81,7 +86,7 @@ async function hydrateTrackerRecords() {
 }
 
 async function persistTrackerRecords() {
-  await chrome.storage.local.set({ jobTrackerRecords: state.trackerRecords });
+  await storageSet({ jobTrackerRecords: state.trackerRecords });
   chrome.runtime.sendMessage({
     type: 'TRACKER_UPDATED',
     records: state.trackerRecords,
@@ -231,7 +236,10 @@ function sendToTab(tabId, message, timeoutMs) {
 async function ensureInjected(tabId, file) {
   const files = file === 'src/content-chat.js'
     ? ['src/selectors.js', 'src/message-bundle.js', 'src/content-chat.js']
-    : ['src/selectors.js', 'src/job-filters.js', 'src/job-detail.js', 'src/content-search.js'];
+    : [
+      'src/selectors.js', 'src/job-filters.js', 'src/job-detail.js',
+      'src/contact-interstitial.js', 'src/content-search.js'
+    ];
   try {
     await chrome.scripting.executeScript({ target: { tabId: tabId }, files: files });
     return true;
@@ -338,6 +346,7 @@ async function establishChatPage(opened, job, temporaryTabIds) {
     expectedJobId: job.id,
     existingTabIds: before.map(tab => tab.id),
     timeoutMs: 30000,
+    missingJobIdGraceMs: 5000,
     pollIntervalMs: 250,
     isCancelled: () => state.aborted
   });
@@ -369,7 +378,8 @@ async function establishChatPage(opened, job, temporaryTabIds) {
 
 // ── 持久化与迁移 ──
 async function persistReviewState() {
-  await chrome.storage.local.set({
+  state.previews = ReviewWorkflow.stripEmbeddedImages(state.previews);
+  await storageSet({
     sw_jobs: state.jobs,
     sw_screened: state.screened,
     sw_previews: state.previews,
@@ -394,6 +404,7 @@ async function hydrateReviewState() {
   }
   if (saved.processed) state.processed = saved.processed;
   await persistReviewState();
+  if (saved.resumeImage) await chrome.storage.local.remove('resumeImage');
 }
 
 function syncJob(job) {
@@ -563,7 +574,7 @@ async function saveGreetingPlans(nextState) {
   const normalized = GreetingPlans.normalizeState(nextState);
   state.greetingPlansState = normalized;
   invalidatePreviews('招呼方案已变化，需要重新预演');
-  await chrome.storage.local.set({
+  await storageSet({
     greetingPlansState: normalized,
     sw_previews: state.previews
   });
@@ -686,7 +697,7 @@ async function runPreview(prepared) {
       if (plan.aiOpeningEnabled && !aiOpening) throw new Error('AI 个性化开场生成失败');
       const preview = ReviewWorkflow.createPreview(
         previewInputs(verified.job, cfg, plan, detail.jd || ''),
-        { aiOpening: aiOpening, fixedMessage: plan.fixedMessage, resumeImage: plan.resumeImage },
+        { aiOpening: aiOpening, fixedMessage: plan.fixedMessage },
         Date.now()
       );
       state.previews[original.id] = preview;
@@ -698,7 +709,7 @@ async function runPreview(prepared) {
       const message = error && error.message ? error.message : '预演失败';
       state.previews[ids[index]] = {
         jobId: ids[index], status: 'failed', aiOpening: '', fixedMessage: '',
-        resumeImage: '', inputFingerprint: '', error: message, createdAt: Date.now()
+        inputFingerprint: '', error: message, createdAt: Date.now()
       };
       state.lastBatch.status = 'failed';
       state.lastBatch.failed.push({ id: ids[index], error: message });
@@ -877,7 +888,7 @@ async function runDeliver(jobIds) {
         type: 'SEND_BUNDLE',
         aiOpening: plan.aiOpeningEnabled ? preview.aiOpening : '',
         fixedMessage: plan.fixedMessageEnabled ? preview.fixedMessage : '',
-        image: plan.resumeImageEnabled ? preview.resumeImage : ''
+        image: plan.resumeImageEnabled ? plan.resumeImage : ''
       }, 45000);
       if (!sent || !sent.success) {
         const stage = sent && sent.stage ? sent.stage : '发送';
@@ -887,7 +898,7 @@ async function runDeliver(jobIds) {
       state.results.push({ id: job.id, name: job.name, ok: true });
       state.lastBatch.succeeded.push(job.id);
       state.processed[job.id] = 1;
-      await chrome.storage.local.set({ processed: state.processed });
+      await storageSet({ processed: state.processed });
       try { await markTrackerContacted(job); }
       catch (error) { log('岗位已发送，但进度记录更新失败：' + error.message, 'warn'); }
       log('✓ 三段式投递成功', 'success');

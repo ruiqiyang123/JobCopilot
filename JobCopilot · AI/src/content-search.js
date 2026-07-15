@@ -160,6 +160,91 @@
     });
   }
 
+  function findChatButton() {
+    let button = document.querySelector(SELECTORS.jobs.immediateChatBtn);
+    if (visible(button)) return button;
+    button = null;
+    const elements = document.querySelectorAll('a, button, span');
+    for (const element of elements) {
+      const text = (element.textContent || '').trim();
+      if ((text === '立即沟通' || text === '继续沟通') && visible(element)) {
+        button = element;
+        break;
+      }
+    }
+    return button;
+  }
+
+  function waitForChatButton(timeout) {
+    return new Promise(resolve => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const button = findChatButton();
+        if (button) { clearInterval(timer); resolve(button); }
+        else if (Date.now() - started > timeout) { clearInterval(timer); resolve(null); }
+      }, 200);
+    });
+  }
+
+  function subscriptionDialog() {
+    if (typeof ContactInterstitial === 'undefined') return null;
+    return ContactInterstitial.findSubscriptionDialog(document, visible);
+  }
+
+  function waitForContactSignal(allowContinue, timeout) {
+    return new Promise(resolve => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const dialog = subscriptionDialog();
+        if (dialog) {
+          clearInterval(timer);
+          resolve({ type: 'subscription', dialog: dialog });
+          return;
+        }
+        if (allowContinue) {
+          const elements = document.querySelectorAll('a, button, span');
+          for (const element of elements) {
+            if ((element.textContent || '').trim() === '继续沟通' && visible(element)) {
+              clearInterval(timer);
+              resolve({ type: 'continue', element: element });
+              return;
+            }
+          }
+        }
+        if (Date.now() - started > timeout) { clearInterval(timer); resolve(null); }
+      }, 200);
+    });
+  }
+
+  function waitForDialogGone(dialog, timeout) {
+    return new Promise(resolve => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const stillTarget = dialog && typeof ContactInterstitial !== 'undefined'
+          && ContactInterstitial.isSubscriptionText(dialog.textContent || '');
+        if (!dialog || !dialog.isConnected || !visible(dialog) || !stillTarget) {
+          clearInterval(timer);
+          resolve(true);
+        } else if (Date.now() - started > timeout) {
+          clearInterval(timer);
+          resolve(false);
+        }
+      }, 150);
+    });
+  }
+
+  async function dismissSubscriptionDialog(dialog) {
+    if (typeof ContactInterstitial === 'undefined') {
+      return { success: false, error: 'BOSS 订阅回复弹窗阻止沟通，请关闭后重试' };
+    }
+    const result = ContactInterstitial.findCloseButton(dialog, visible);
+    if (!result.button) return { success: false, error: result.error };
+    result.button.click();
+    const gone = await waitForDialogGone(dialog, 2500);
+    if (!gone) return { success: false, error: 'BOSS 订阅回复弹窗阻止沟通，请关闭后重试' };
+    return { success: true };
+  }
+
   async function openJD(job) {
     if (JobDetail.canonicalizeDetailUrl(location.href)) {
       const result = parseDetailPage();
@@ -184,24 +269,39 @@
   }
 
   async function goChat(job) {
-    let button = await waitFor(SELECTORS.jobs.immediateChatBtn, 5000);
-    if (!button) {
-      const elements = document.querySelectorAll('a, button, span');
-      for (const element of elements) {
-        const text = (element.textContent || '').trim();
-        if (text === '立即沟通' || text === '继续沟通') { button = element; break; }
-      }
-    }
+    let button = await waitForChatButton(5000);
     if (!button && !JobDetail.canonicalizeDetailUrl(location.href)) {
       const card = findCardByJob(job);
-      if (card) { card.click(); await sleep(1200); button = await waitFor(SELECTORS.jobs.immediateChatBtn, 4000); }
+      if (card) { card.click(); await sleep(1200); button = await waitForChatButton(4000); }
     }
     if (!button) return { success: false, error: '未找到立即沟通按钮' };
-    button.click();
-    await sleep(1500);
-    const continueButton = await waitForText(['继续沟通'], 4000);
-    if (continueButton) { continueButton.click(); return { success: true, navigated: true }; }
-    return { success: true, navigated: false };
+
+    let dismissed = false;
+    let usedContinue = false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const clickedContinue = (button.textContent || '').trim() === '继续沟通';
+      button.click();
+      const signal = await waitForContactSignal(!clickedContinue, clickedContinue ? 1800 : 4000);
+      let dialog = signal && signal.type === 'subscription' ? signal.dialog : null;
+
+      if (signal && signal.type === 'continue') {
+        usedContinue = true;
+        signal.element.click();
+        const afterContinue = await waitForContactSignal(false, 1800);
+        dialog = afterContinue && afterContinue.type === 'subscription' ? afterContinue.dialog : null;
+      }
+
+      if (!dialog) return { success: true, navigated: usedContinue || clickedContinue };
+      if (dismissed) {
+        return { success: false, error: 'BOSS 订阅回复弹窗重复出现，已停止批次' };
+      }
+      const closed = await dismissSubscriptionDialog(dialog);
+      if (!closed.success) return closed;
+      dismissed = true;
+      button = await waitForChatButton(4000);
+      if (!button) return { success: false, error: '关闭订阅回复弹窗后未找到沟通按钮' };
+    }
+    return { success: false, error: 'BOSS 订阅回复弹窗重复出现，已停止批次' };
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
