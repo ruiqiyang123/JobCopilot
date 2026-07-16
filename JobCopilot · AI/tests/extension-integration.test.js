@@ -61,6 +61,8 @@ test('侧边栏提供模型配置、迁移、域名授权和测试连接', () =>
 test('Manifest 固定授权内置服务商，并把其他 HTTPS 域名设为可选', () => {
   const manifest = JSON.parse(read('manifest.json'));
 
+  assert.equal(manifest.version, '1.8.2');
+  assert.match(read('../README.md'), /version-1\.8\.2-/);
   assert.ok(manifest.host_permissions.includes('https://api.xiaomimimo.com/*'));
   assert.ok(manifest.host_permissions.includes('https://api.deepseek.com/*'));
   assert.ok(manifest.host_permissions.includes('https://api.longcat.chat/*'));
@@ -543,19 +545,51 @@ test('AI 自动筛选使用短结果，六维详细评分改为按需生成', ()
   assert.match(sidepanelJs, /data-action="detailed-score"/);
 });
 
-test('人工确认使用异步快速判断，推荐岗位支持一次批量批准', () => {
+test('待补充岗位可批量人工覆盖，推荐队列统一批量批准', () => {
   const background = read('src/background.js');
   const sidepanelHtml = read('src/sidepanel.html');
   const sidepanelJs = read('src/sidepanel.js');
 
-  assert.match(background, /aiScreeningStatus:\s*'running'/);
+  assert.match(background, /BATCH_CONFIRM_CANDIDATES/);
   assert.match(background, /BATCH_APPROVE/);
+  assert.match(background, /ReviewWorkflow\.confirmManyCandidates/);
   assert.match(background, /ReviewWorkflow\.approveMany/);
+  assert.match(sidepanelHtml, /id="bulkCandidateActions"/);
+  assert.match(sidepanelHtml, /id="selectAllCandidates"/);
+  assert.match(sidepanelHtml, /id="btnBulkConfirmCandidates"/);
   assert.match(sidepanelHtml, /id="bulkReviewActions"/);
   assert.match(sidepanelHtml, /id="selectAllRecommended"/);
   assert.match(sidepanelHtml, /id="btnBulkApprove"/);
+  assert.match(sidepanelJs, /BATCH_CONFIRM_CANDIDATES/);
   assert.match(sidepanelJs, /BATCH_APPROVE/);
-  assert.match(sidepanelJs, /AI 快速判断中/);
+  assert.match(sidepanelJs, /ReviewWorkflow\.isManualConfirmable/);
+  assert.match(sidepanelJs, /ReviewWorkflow\.isBulkApprovable/);
+});
+
+test('待确认预演支持默认全选批量确认并保留最终投递弹窗', () => {
+  const background = read('src/background.js');
+  const sidepanelHtml = read('src/sidepanel.html');
+  const sidepanelJs = read('src/sidepanel.js');
+
+  assert.match(background, /BATCH_CONFIRM_PREVIEWS/);
+  assert.match(background, /ReviewWorkflow\.confirmManyPreviews/);
+  assert.match(background, /regeneratingPreviewTasks/);
+  assert.match(sidepanelHtml, /id="bulkPreviewActions"/);
+  assert.match(sidepanelHtml, /id="selectAllPreviews"/);
+  assert.match(sidepanelHtml, /id="btnBulkConfirmPreviews"/);
+  assert.match(sidepanelJs, /BATCH_CONFIRM_PREVIEWS/);
+  assert.match(sidepanelJs, /openingsByJobId/);
+  assert.match(sidepanelJs, /一键确认预演/);
+
+  const batchStart = background.indexOf('async function batchConfirmPreviews');
+  const batchEnd = background.indexOf('async function updatePreviewDraft', batchStart);
+  assert.ok(batchStart >= 0 && batchEnd > batchStart, '缺少独立的批量预演确认函数');
+  assert.doesNotMatch(background.slice(batchStart, batchEnd), /runDeliver|START_DELIVER|SEND_BUNDLE/);
+
+  const deliveryStart = sidepanelJs.indexOf('function startDelivery');
+  const deliveryEnd = sidepanelJs.indexOf('// ── 岗位进度', deliveryStart);
+  assert.match(sidepanelJs.slice(deliveryStart, deliveryEnd), /window\.confirm/);
+  assert.match(sidepanelJs.slice(deliveryStart, deliveryEnd), /START_DELIVER/);
 });
 
 test('侧边栏提供可命名筛选方案、旧配置迁移和条件摘要', () => {
@@ -571,4 +605,34 @@ test('侧边栏提供可命名筛选方案、旧配置迁移和条件摘要', ()
   assert.match(js, /SearchProfiles\.normalizeState/);
   assert.match(js, /SearchProfiles\.upsertProfile/);
   assert.match(js, /searchProfilesState/);
+});
+
+test('岗位审核与投递预演使用固定窗口且只滚动列表', () => {
+  const html = read('src/sidepanel.html');
+  const css = read('src/sidepanel.css');
+
+  assert.match(html, /class="card fixed-list-card" id="reviewCard"/);
+  assert.match(html, /class="card fixed-list-card" id="previewCard"/);
+  assert.match(html, /id="reviewList" class="fixed-list-scroll" tabindex="0"/);
+  assert.match(html, /id="previewList" class="fixed-list-scroll" tabindex="0"/);
+  assert.match(html, /class="sticky-action fixed-list-footer"/);
+  assert.match(html, /class="fixed-list-footer preview-footer"/);
+  assert.ok(html.indexOf('list-scroll-state.js') < html.indexOf('sidepanel.js'));
+
+  assert.match(css, /\.fixed-list-card\s*\{[^}]*height:\s*clamp\(360px,\s*60vh,\s*720px\)/s);
+  assert.match(css, /\.fixed-list-scroll\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/s);
+  assert.match(css, /\.fixed-list-scroll\s*\{[^}]*overscroll-behavior:\s*contain/s);
+  assert.match(css, /\.fixed-list-scroll\s*\{[^}]*scrollbar-gutter:\s*stable/s);
+});
+
+test('列表重渲染保留滚动位置且分类切换回到顶部', () => {
+  const js = read('src/sidepanel.js');
+
+  assert.match(js, /function renderScrollableList\(listId, html, reset\)/);
+  assert.match(js, /ListScrollState\.target\(list, reset\)/);
+  assert.match(js, /requestAnimationFrame\(\(\) => ListScrollState\.apply\(list, target\)\)/);
+  assert.match(js, /function renderReview\(options\)/);
+  assert.match(js, /renderScrollableList\(\s*'reviewList',[\s\S]*resetScroll/);
+  assert.match(js, /renderReview\(\{ resetScroll: true \}\)/);
+  assert.match(js, /renderScrollableList\(\s*'previewList',[\s\S]*false/);
 });

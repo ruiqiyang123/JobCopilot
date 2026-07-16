@@ -6,7 +6,7 @@
 
 从岗位收集、完整 JD 筛选到人工审批、消息预演和安全投递，把重复操作交给 AI，把最终决定留给你。
 
-![Version](https://img.shields.io/badge/version-1.8.0-5b5bd6.svg)
+![Version](https://img.shields.io/badge/version-1.8.2-5b5bd6.svg)
 ![Platform](https://img.shields.io/badge/platform-Edge%20%7C%20Chrome-brightgreen.svg)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-orange.svg)
 ![AI](https://img.shields.io/badge/AI-MiMo%20%7C%20DeepSeek%20%7C%20LongCat%20%7C%20Custom-purple.svg)

@@ -21,7 +21,11 @@ const regeneratingPreviewIds = new Set();
 const previewActionErrors = {};
 const previewDraftTimers = {};
 const deselectedRecommendedIds = new Set();
+const deselectedCandidateIds = new Set();
+const deselectedPreviewIds = new Set();
 let bulkApproving = false;
+let bulkConfirmingCandidates = false;
+let bulkConfirmingPreviews = false;
 
 function esc(value) {
   return String(value || '').replace(/[&<>"]/g, character => ({
@@ -40,6 +44,13 @@ function runtimeMessage(message) {
       else resolve(response || { ok: false, error: '扩展后台无响应' });
     });
   });
+}
+
+function renderScrollableList(listId, html, reset) {
+  const list = $(listId);
+  const target = ListScrollState.target(list, reset);
+  list.innerHTML = html;
+  window.requestAnimationFrame(() => ListScrollState.apply(list, target));
 }
 
 async function localStorageSet(values) {
@@ -709,10 +720,16 @@ function renderReviewCard(job) {
   const title = link
     ? '<a href="' + esc(link) + '" target="_blank" rel="noreferrer">' + esc(job.name) + '</a>'
     : esc(job.name);
-  const selectable = ReviewWorkflow.isBulkApprovable(job);
-  const selection = selectable
-    ? '<label class="job-select"><input type="checkbox" data-review-select="' + esc(job.id) + '"'
-      + (deselectedRecommendedIds.has(job.id) ? '' : ' checked') + '>选择</label>' : '';
+  const approvable = ReviewWorkflow.isBulkApprovable(job);
+  const confirmable = ReviewWorkflow.isManualConfirmable(job);
+  const selectionKind = approvable ? 'recommended' : (confirmable ? 'candidate' : '');
+  const deselected = selectionKind === 'recommended'
+    ? deselectedRecommendedIds
+    : deselectedCandidateIds;
+  const selection = selectionKind
+    ? '<label class="job-select"><input type="checkbox" data-review-select="' + esc(job.id)
+      + '" data-review-select-kind="' + selectionKind + '"'
+      + (deselected.has(String(job.id)) ? '' : ' checked') + '>选择</label>' : '';
   let actions = '';
   if (link) actions += '<a class="icon-btn" href="' + esc(link) + '" target="_blank" rel="noreferrer">查看完整岗位</a>';
   if (job.reviewStatus === 'needs_info') {
@@ -775,7 +792,8 @@ function reviewStatusLabel(status) {
   })[status] || status;
 }
 
-function renderReview() {
+function renderReview(options) {
+  const resetScroll = Boolean(options && options.resetScroll);
   const counts = reviewCounts();
   document.querySelectorAll('[data-review-tab]').forEach(button => {
     const status = button.dataset.reviewTab;
@@ -785,8 +803,11 @@ function renderReview() {
   });
   $('reviewCount').textContent = activeJobs().length + ' 个待处理岗位';
   const visible = MatchScoring.sortJobs(activeJobs()).filter(job => job.reviewStatus === currentReviewTab);
-  $('reviewList').innerHTML = visible.map(renderReviewCard).join('')
-    || '<div class="empty">当前分类没有岗位</div>';
+  renderScrollableList(
+    'reviewList',
+    visible.map(renderReviewCard).join('') || '<div class="empty">当前分类没有岗位</div>',
+    resetScroll
+  );
   renderBulkReviewActions();
   $('approvedSummary').textContent = '已批准 ' + counts.approved + ' 个';
   renderPreviewButton(counts.approved);
@@ -798,12 +819,24 @@ function recommendedForBulk() {
 }
 
 function selectedRecommendedIds() {
-  return recommendedForBulk().filter(job => !deselectedRecommendedIds.has(job.id)).map(job => job.id);
+  return recommendedForBulk()
+    .filter(job => !deselectedRecommendedIds.has(String(job.id)))
+    .map(job => job.id);
+}
+
+function candidatesForBulk() {
+  return activeJobs().filter(job => ReviewWorkflow.isManualConfirmable(job));
+}
+
+function selectedCandidateIds() {
+  return candidatesForBulk()
+    .filter(job => !deselectedCandidateIds.has(String(job.id)))
+    .map(job => job.id);
 }
 
 function renderBulkReviewActions() {
   const jobs = recommendedForBulk();
-  const eligibleIds = new Set(jobs.map(job => job.id));
+  const eligibleIds = new Set(jobs.map(job => String(job.id)));
   Array.from(deselectedRecommendedIds).forEach(id => {
     if (!eligibleIds.has(id)) deselectedRecommendedIds.delete(id);
   });
@@ -816,13 +849,31 @@ function renderBulkReviewActions() {
   $('btnBulkApprove').disabled = bulkApproving || selected.length === 0;
   $('btnBulkApprove').textContent = bulkApproving
     ? '批量批准中…' : '一键批准推荐岗位（' + selected.length + '）';
+
+  const candidates = candidatesForBulk();
+  const candidateIds = new Set(candidates.map(job => String(job.id)));
+  Array.from(deselectedCandidateIds).forEach(id => {
+    if (!candidateIds.has(id)) deselectedCandidateIds.delete(id);
+  });
+  const selectedCandidates = selectedCandidateIds();
+  const candidatesVisible = currentReviewTab === 'needs_info' && candidates.length > 0;
+  $('bulkCandidateActions').classList.toggle('hidden', !candidatesVisible);
+  $('selectAllCandidates').checked = candidates.length > 0
+    && selectedCandidates.length === candidates.length;
+  $('selectAllCandidates').indeterminate = selectedCandidates.length > 0
+    && selectedCandidates.length < candidates.length;
+  $('selectAllCandidates').disabled = bulkConfirmingCandidates;
+  $('btnBulkConfirmCandidates').disabled = bulkConfirmingCandidates
+    || selectedCandidates.length === 0;
+  $('btnBulkConfirmCandidates').textContent = bulkConfirmingCandidates
+    ? '批量确认中…' : '一键确认符合（' + selectedCandidates.length + '）';
 }
 
 $('reviewTabs').addEventListener('click', event => {
   const button = event.target.closest('[data-review-tab]');
   if (!button) return;
   currentReviewTab = button.dataset.reviewTab;
-  renderReview();
+  renderReview({ resetScroll: true });
 });
 
 $('reviewList').addEventListener('click', async event => {
@@ -859,15 +910,28 @@ $('reviewList').addEventListener('click', async event => {
 $('reviewList').addEventListener('change', event => {
   const input = event.target.closest('[data-review-select]');
   if (!input) return;
-  if (input.checked) deselectedRecommendedIds.delete(input.dataset.reviewSelect);
-  else deselectedRecommendedIds.add(input.dataset.reviewSelect);
+  const deselected = input.dataset.reviewSelectKind === 'candidate'
+    ? deselectedCandidateIds
+    : deselectedRecommendedIds;
+  if (input.checked) deselected.delete(input.dataset.reviewSelect);
+  else deselected.add(input.dataset.reviewSelect);
   renderBulkReviewActions();
+});
+
+$('selectAllCandidates').addEventListener('change', event => {
+  candidatesForBulk().forEach(job => {
+    const id = String(job.id);
+    if (event.target.checked) deselectedCandidateIds.delete(id);
+    else deselectedCandidateIds.add(id);
+  });
+  renderReview();
 });
 
 $('selectAllRecommended').addEventListener('change', event => {
   recommendedForBulk().forEach(job => {
-    if (event.target.checked) deselectedRecommendedIds.delete(job.id);
-    else deselectedRecommendedIds.add(job.id);
+    const id = String(job.id);
+    if (event.target.checked) deselectedRecommendedIds.delete(id);
+    else deselectedRecommendedIds.add(id);
   });
   renderReview();
 });
@@ -881,12 +945,36 @@ $('btnBulkApprove').addEventListener('click', async () => {
     const response = await runtimeMessage({ type: 'BATCH_APPROVE', jobIds: ids });
     if (!response.ok) throw new Error(response.error || '批量批准失败');
     currentScreened = response.result.screened || currentScreened;
-    (response.result.approvedIds || []).forEach(id => deselectedRecommendedIds.delete(id));
+    (response.result.approvedIds || []).forEach(id => deselectedRecommendedIds.delete(String(id)));
     addLog('已批量批准 ' + (response.result.approvedIds || []).length + ' 个推荐岗位', 'success');
   } catch (error) {
     addLog(error.message, 'error');
   } finally {
     bulkApproving = false;
+    renderReview();
+  }
+});
+
+$('btnBulkConfirmCandidates').addEventListener('click', async () => {
+  const ids = selectedCandidateIds();
+  if (!ids.length || bulkConfirmingCandidates) return;
+  bulkConfirmingCandidates = true;
+  renderBulkReviewActions();
+  try {
+    const response = await runtimeMessage({ type: 'BATCH_CONFIRM_CANDIDATES', jobIds: ids });
+    if (!response.ok) throw new Error(response.error || '批量人工确认失败');
+    currentScreened = response.result.screened || currentScreened;
+    const confirmedIds = response.result.confirmedIds || [];
+    const skippedIds = response.result.skippedIds || [];
+    confirmedIds.forEach(id => deselectedCandidateIds.delete(String(id)));
+    currentReviewTab = 'pending_review';
+    addLog('已人工确认 ' + confirmedIds.length + ' 个岗位并加入推荐'
+      + (skippedIds.length ? '，跳过 ' + skippedIds.length + ' 个状态已变化岗位' : ''),
+    skippedIds.length ? 'warn' : 'success');
+  } catch (error) {
+    addLog(error.message, 'error');
+  } finally {
+    bulkConfirmingCandidates = false;
     renderReview();
   }
 });
@@ -978,7 +1066,15 @@ function renderPreviewItem(job, preview) {
   const confirmed = preview.status === 'confirmed';
   const confirming = confirmingPreviewIds.has(job.id);
   const regenerating = regeneratingPreviewIds.has(job.id);
-  const confirmDisabled = confirmed || confirming || regenerating || (aiEnabled && !String(preview.aiOpening || '').trim());
+  const bulkEligibility = ReviewWorkflow.previewBulkConfirmability(
+    job, preview, preview.aiOpening, regenerating
+  );
+  const selection = '<label class="job-select' + (bulkEligibility.ok ? '' : ' hidden') + '">'
+    + '<input type="checkbox" data-preview-select="' + esc(job.id) + '"'
+    + (deselectedPreviewIds.has(String(job.id)) ? '' : ' checked')
+    + ((bulkConfirmingPreviews || !bulkEligibility.ok) ? ' disabled' : '') + '>选择</label>';
+  const confirmDisabled = confirmed || confirming || regenerating || bulkConfirmingPreviews
+    || (aiEnabled && !String(preview.aiOpening || '').trim());
   const confirmText = confirmed ? '✓ 已确认' : (confirming ? '确认中…' : '确认此岗位预演');
   const actionError = previewActionErrors[job.id]
     ? '<div class="job-reason skip">' + esc(previewActionErrors[job.id]) + '</div>' : '';
@@ -986,15 +1082,16 @@ function renderPreviewItem(job, preview) {
     + esc(job.id) + '"' + (confirmDisabled ? ' disabled' : '') + '>' + confirmText + '</button>';
   const regenerateButton = aiEnabled
     ? '<button class="regenerate" data-regenerate-preview="' + esc(job.id) + '"'
-      + ((confirming || regenerating) ? ' disabled' : '') + '>'
+      + ((confirming || regenerating || bulkConfirmingPreviews) ? ' disabled' : '') + '>'
       + (regenerating ? '生成中…' : '重新生成 AI 开场') + '</button>'
     : '';
-  return '<article class="preview-item"><div class="job-head"><div class="job-title">' + esc(job.name) + '</div>'
+  return '<article class="preview-item"><div class="job-head"><div class="job-title">'
+    + selection + esc(job.name) + '</div>'
     + '<span class="preview-status ' + (confirmed ? 'confirmed' : (regenerating ? 'running' : ''))
     + '" data-preview-status="' + esc(job.id) + '">'
     + (confirmed ? '✓ 已确认' : (regenerating ? '重新生成中…' : '待确认')) + '</span></div>'
     + (aiEnabled ? '<label>AI 个性化开场</label><textarea rows="6" data-preview-opening="' + esc(job.id) + '"'
-      + (regenerating ? ' disabled' : '') + '>'
+      + ((regenerating || bulkConfirmingPreviews) ? ' disabled' : '') + '>'
       + esc(preview.aiOpening) + '</textarea>' : '')
     + (fixedEnabled ? '<div class="preview-part"><strong>固定补充消息</strong>' + esc(preview.fixedMessage) + '</div>' : '')
     + (imageEnabled ? '<div class="preview-part"><strong>简历图片</strong>已绑定当前招呼方案图片</div>' : '')
@@ -1008,8 +1105,58 @@ function confirmedApprovedJobs() {
     && currentPreviews[job.id] && currentPreviews[job.id].status === 'confirmed');
 }
 
+function completePreviewJobs() {
+  return activeJobs().filter(job => {
+    if (job.reviewStatus !== 'approved') return false;
+    const preview = currentPreviews[job.id];
+    if (!preview || (preview.status !== 'draft' && preview.status !== 'confirmed')) return false;
+    if (!preview.inputFingerprint || preview.inputFingerprintVersion !== 2
+        || !preview.inputFingerprintParts || !(preview.enabledSteps || []).length) return false;
+    return (preview.enabledSteps || []).indexOf('aiOpening') < 0
+      || Boolean(String(preview.aiOpening || '').trim());
+  });
+}
+
+function renderPreviewSummary() {
+  const complete = completePreviewJobs();
+  const confirmed = complete.filter(job => currentPreviews[job.id].status === 'confirmed').length;
+  $('previewSummary').textContent = confirmed + ' / ' + complete.length + ' 个已确认';
+}
+
+function previewsForBulk() {
+  return activeJobs().filter(job => job.reviewStatus === 'approved'
+    && ReviewWorkflow.previewBulkConfirmability(
+      job,
+      currentPreviews[job.id],
+      currentPreviews[job.id] && currentPreviews[job.id].aiOpening,
+      regeneratingPreviewIds.has(job.id)
+    ).ok);
+}
+
+function selectedPreviewIds() {
+  return previewsForBulk()
+    .filter(job => !deselectedPreviewIds.has(String(job.id)))
+    .map(job => job.id);
+}
+
+function renderBulkPreviewActions() {
+  const jobs = previewsForBulk();
+  const eligibleIds = new Set(jobs.map(job => String(job.id)));
+  Array.from(deselectedPreviewIds).forEach(id => {
+    if (!eligibleIds.has(id)) deselectedPreviewIds.delete(id);
+  });
+  const selected = selectedPreviewIds();
+  const visible = jobs.length > 0 && !PreviewRunState.isRunning(currentPreviewRun);
+  $('bulkPreviewActions').classList.toggle('hidden', !visible);
+  $('selectAllPreviews').checked = jobs.length > 0 && selected.length === jobs.length;
+  $('selectAllPreviews').indeterminate = selected.length > 0 && selected.length < jobs.length;
+  $('selectAllPreviews').disabled = bulkConfirmingPreviews;
+  $('btnBulkConfirmPreviews').disabled = bulkConfirmingPreviews || selected.length === 0;
+  $('btnBulkConfirmPreviews').textContent = bulkConfirmingPreviews
+    ? '批量确认中…' : '一键确认预演（' + selected.length + '）';
+}
+
 function renderDeliveryControls(ready) {
-  $('previewSummary').textContent = ready.length + ' 个已确认';
   $('btnDeliver').disabled = ready.length === 0;
   $('btnDeliver').textContent = ready.length ? '正式投递 ' + ready.length + ' 个已批准岗位' : '暂无可正式投递岗位';
   $('deliverDisabledReason').textContent = ready.length
@@ -1021,16 +1168,22 @@ function renderDeliveryControls(ready) {
 function renderPreviews() {
   if (!$('previewList')) return;
   const approved = activeJobs().filter(job => job.reviewStatus === 'approved');
-  $('previewList').innerHTML = approved.length
-    ? approved.map(job => renderPreviewItem(job, currentPreviews[job.id])).join('')
-    : '<div class="empty">批准岗位后点击“预演已批准岗位”</div>';
+  renderScrollableList(
+    'previewList',
+    approved.length
+      ? approved.map(job => renderPreviewItem(job, currentPreviews[job.id])).join('')
+      : '<div class="empty">批准岗位后点击“预演已批准岗位”</div>',
+    false
+  );
   const ready = confirmedApprovedJobs();
   renderPreviewButton(approved.length);
   renderPreviewRunError();
   $('btnRetryPreviewFailures').classList.toggle(
     'hidden', PreviewRunState.isRunning(currentPreviewRun) || failedPreviewIds().length === 0
   );
+  renderBulkPreviewActions();
   renderDeliveryControls(ready);
+  renderPreviewSummary();
   renderBatchCompletion();
 }
 
@@ -1099,7 +1252,19 @@ $('previewList').addEventListener('input', event => {
       confirmButton.className = 'confirm';
       confirmButton.disabled = !textarea.value.trim();
     }
+    const selectInput = textarea.closest('.preview-item').querySelector('[data-preview-select]');
+    if (selectInput) {
+      const job = activeJobs().find(item => String(item.id) === String(jobId));
+      const eligible = ReviewWorkflow.previewBulkConfirmability(
+        job, currentPreviews[jobId], textarea.value, regeneratingPreviewIds.has(jobId)
+      ).ok;
+      selectInput.closest('.job-select').classList.toggle('hidden', !eligible);
+      selectInput.disabled = bulkConfirmingPreviews || !eligible;
+      selectInput.checked = eligible && !deselectedPreviewIds.has(String(jobId));
+    }
     renderDeliveryControls(confirmedApprovedJobs());
+    renderBulkPreviewActions();
+    renderPreviewSummary();
     if (wasConfirmed) {
       runtimeMessage({
         type: 'UPDATE_PREVIEW_DRAFT', jobId: jobId, aiOpening: textarea.value, editedAt: editedAt
@@ -1118,6 +1283,63 @@ $('previewList').addEventListener('input', event => {
         addLog(error.message, 'error');
       });
     }, 400);
+  }
+});
+
+$('previewList').addEventListener('change', event => {
+  const input = event.target.closest('[data-preview-select]');
+  if (!input) return;
+  if (input.checked) deselectedPreviewIds.delete(input.dataset.previewSelect);
+  else deselectedPreviewIds.add(input.dataset.previewSelect);
+  renderBulkPreviewActions();
+});
+
+$('selectAllPreviews').addEventListener('change', event => {
+  previewsForBulk().forEach(job => {
+    const id = String(job.id);
+    if (event.target.checked) deselectedPreviewIds.delete(id);
+    else deselectedPreviewIds.add(id);
+  });
+  renderPreviews();
+});
+
+$('btnBulkConfirmPreviews').addEventListener('click', async () => {
+  const ids = selectedPreviewIds();
+  if (!ids.length || bulkConfirmingPreviews) return;
+  const openingsByJobId = {};
+  ids.forEach(id => {
+    const key = String(id);
+    clearTimeout(previewDraftTimers[key]);
+    const textarea = document.querySelector('[data-preview-opening="' + CSS.escape(key) + '"]');
+    openingsByJobId[key] = textarea
+      ? textarea.value
+      : (currentPreviews[key] && currentPreviews[key].aiOpening);
+    previewActionErrors[key] = '';
+  });
+  bulkConfirmingPreviews = true;
+  renderPreviews();
+  try {
+    const response = await runtimeMessage({
+      type: 'BATCH_CONFIRM_PREVIEWS',
+      jobIds: ids,
+      openingsByJobId: openingsByJobId
+    });
+    if (!response.ok) throw new Error(response.error || '批量预演确认失败');
+    currentPreviews = response.result.previews || currentPreviews;
+    const confirmedIds = response.result.confirmedIds || [];
+    const skipped = response.result.skipped || [];
+    confirmedIds.forEach(id => deselectedPreviewIds.delete(String(id)));
+    skipped.forEach(item => {
+      if (item && item.id) previewActionErrors[item.id] = item.reason || '预演确认失败';
+    });
+    addLog('已确认 ' + confirmedIds.length + ' 个岗位预演'
+      + (skipped.length ? '，跳过 ' + skipped.length + ' 个' : ''),
+    skipped.length ? 'warn' : 'success');
+  } catch (error) {
+    addLog(error.message, 'error');
+  } finally {
+    bulkConfirmingPreviews = false;
+    renderPreviews();
   }
 });
 
